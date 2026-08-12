@@ -74,7 +74,10 @@ def _add_render_overrides(parser: argparse.ArgumentParser) -> None:
         dest="source_anchors",
         action="store_true",
         default=None,
-        help="pass through every aligned source photograph on its own scheduled frame",
+        help=(
+            "render only complete aligned source photographs, with every source on "
+            "its own scheduled frame"
+        ),
     )
     anchor_group.add_argument(
         "--no-source-anchors",

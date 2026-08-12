@@ -587,8 +587,8 @@ def _schedule_source_anchors(
     )
 
 
-class _SourceAnchorInterpolator:
-    """Produce a continuous physical render that passes exactly through each source."""
+class _SourceOnlyTimeline:
+    """Render a clock-linear sequence using only complete source photographs."""
 
     def __init__(
         self,
@@ -603,56 +603,19 @@ class _SourceAnchorInterpolator:
         )
 
     def render(self, output_frame: int) -> np.ndarray:
-        """Render one frame, returning the aligned source unchanged at every anchor."""
+        """Return the complete aligned photograph nearest this output frame."""
         insertion = int(np.searchsorted(self.output_frames, output_frame, side="left"))
-        if insertion < len(self.anchors):
-            anchor = self.anchors[insertion]
-            if anchor.output_frame == output_frame:
-                return self.cache.get(anchor.source_index).copy()
-
-        right_index = min(max(insertion, 1), len(self.anchors) - 1)
-        left_index = right_index - 1
-        left_anchor = self.anchors[left_index]
-        right_anchor = self.anchors[right_index]
-        interval = right_anchor.output_frame - left_anchor.output_frame
-        fraction = (output_frame - left_anchor.output_frame) / interval
-        smooth_fraction = fraction * fraction * (3.0 - 2.0 * fraction)
-
-        left_distance = self.cache.signed_distance(left_anchor.source_index)
-        right_distance = self.cache.signed_distance(right_anchor.source_index)
-        target_distance = (
-            left_distance * (1.0 - smooth_fraction) + right_distance * smooth_fraction
-        )
-        target_mask = np.clip((target_distance + 1.0) / 2.0, 0.0, 1.0)
-        assert self.cache.solar_mask is not None
-        target_mask *= self.cache.solar_mask
-        left_frame = self.cache.frames[left_anchor.source_index]
-        right_frame = self.cache.frames[right_anchor.source_index]
-        left_image = self.cache.get(left_anchor.source_index)
-        right_image = self.cache.get(right_anchor.source_index)
-        safe_margin = max(1.5, self.cache.render.resolution * 0.002)
-        left_safe = left_distance > safe_margin
-        right_safe = right_distance > safe_margin
-        prefer_left = left_frame.bright_pixels > right_frame.bright_pixels or (
-            left_frame.bright_pixels == right_frame.bright_pixels and fraction < 0.5
-        )
-        if prefer_left:
-            texture = left_image.copy()
-            texture[~left_safe & right_safe] = right_image[~left_safe & right_safe]
+        if insertion == 0:
+            source_index = 0
+        elif insertion == len(self.anchors):
+            source_index = len(self.anchors) - 1
         else:
-            texture = right_image.copy()
-            texture[~right_safe & left_safe] = left_image[~right_safe & left_safe]
-        neither_safe = ~left_safe & ~right_safe
-        prefer_left_pixel = left_distance >= right_distance
-        texture[neither_safe & prefer_left_pixel] = left_image[
-            neither_safe & prefer_left_pixel
-        ]
-        texture[neither_safe & ~prefer_left_pixel] = right_image[
-            neither_safe & ~prefer_left_pixel
-        ]
-        texture = texture.astype(np.float32)
-        texture *= target_mask[:, :, None]
-        return np.uint8(np.clip(np.rint(texture), 0.0, 255.0))
+            left = self.anchors[insertion - 1]
+            right = self.anchors[insertion]
+            left_distance = output_frame - left.output_frame
+            right_distance = right.output_frame - output_frame
+            source_index = insertion - 1 if left_distance <= right_distance else insertion
+        return self.cache.get(self.anchors[source_index].source_index).copy()
 
     def anchor_report(self) -> dict[str, object]:
         """Return an auditable record of source placement and pre-encode identity."""
@@ -680,9 +643,9 @@ class _SourceAnchorInterpolator:
         )
         return {
             "policy": "aligned-source-pass-through",
-            "intermediate_texture_policy": (
-                "maximum-coverage-source-pixels-with-safe-occlusion-fallback"
-            ),
+            "intermediate_texture_policy": "nearest-complete-source-frame-hold",
+            "synthetic_frame_count": 0,
+            "pre_encode_all_frames_are_complete_sources": True,
             "pre_encode_pixel_identity": True,
             "encoded_pixel_identity": self.cache.render.codec == "ffv1",
             "geometric_operations": [
@@ -744,9 +707,7 @@ def _render_project_unlocked(
     output_file = config.output_file
     temporary_file = output_file.with_name(f".{output_file.stem}.partial{output_file.suffix}")
     cache = _AlignedFrameCache(config.input_directory, included, render)
-    if render.source_anchors:
-        cache.prepare_solar_mask(report.eclipse_model.solar_radius)
-    elif render.interpolation == "physical":
+    if render.interpolation == "physical" and not render.source_anchors:
         cache.prepare_physical_atlas(
             report.eclipse_model.solar_radius,
             progress,
@@ -764,8 +725,8 @@ def _render_project_unlocked(
         if render.source_anchors
         else ()
     )
-    anchor_interpolator = (
-        _SourceAnchorInterpolator(
+    source_timeline = (
+        _SourceOnlyTimeline(
             cache,
             anchors,
         )
@@ -835,45 +796,52 @@ def _render_project_unlocked(
     try:
         assert process.stdin is not None
         for output_index in range(total_frames):
-            video_progress = output_index / (total_frames - 1)
-            left, right, alpha = frame_blend(positions, video_progress)
-            if anchor_interpolator is not None:
-                image = anchor_interpolator.render(output_index)
-            elif render.interpolation == "physical":
-                image = _physical_frame(
-                    included[left],
-                    included[right],
-                    alpha,
-                    cache,
-                    report.eclipse_model,
-                )
+            if source_timeline is not None:
+                image = source_timeline.render(output_index)
             else:
-                left_image = cache.get(left)
-                if right == left or alpha <= 0:
-                    image = left_image
-                elif alpha >= 1:
-                    image = cache.get(right)
-                elif render.interpolation == "morph":
-                    image = _distance_morph_blend(
-                        left_image,
-                        cache.get(right),
-                        left,
-                        right,
-                        alpha,
-                        cache,
-                    )
-                elif render.interpolation == "geometry":
-                    image = _geometry_blend(
-                        left_image,
-                        cache.get(right),
+                video_progress = output_index / (total_frames - 1)
+                left, right, alpha = frame_blend(positions, video_progress)
+                if render.interpolation == "physical":
+                    image = _physical_frame(
                         included[left],
                         included[right],
                         alpha,
                         cache,
-                        report.median_radius,
+                        report.eclipse_model,
                     )
                 else:
-                    image = cv2.addWeighted(left_image, 1.0 - alpha, cache.get(right), alpha, 0.0)
+                    left_image = cache.get(left)
+                    if right == left or alpha <= 0:
+                        image = left_image
+                    elif alpha >= 1:
+                        image = cache.get(right)
+                    elif render.interpolation == "morph":
+                        image = _distance_morph_blend(
+                            left_image,
+                            cache.get(right),
+                            left,
+                            right,
+                            alpha,
+                            cache,
+                        )
+                    elif render.interpolation == "geometry":
+                        image = _geometry_blend(
+                            left_image,
+                            cache.get(right),
+                            included[left],
+                            included[right],
+                            alpha,
+                            cache,
+                            report.median_radius,
+                        )
+                    else:
+                        image = cv2.addWeighted(
+                            left_image,
+                            1.0 - alpha,
+                            cache.get(right),
+                            alpha,
+                            0.0,
+                        )
             if output_index == total_frames // 2:
                 poster = image.copy()
             process.stdin.write(image.tobytes())
@@ -917,7 +885,7 @@ def _render_project_unlocked(
         if render.interpolation == "physical" and not render.source_anchors
         else None
     )
-    anchor_report = anchor_interpolator.anchor_report() if anchor_interpolator else None
+    anchor_report = source_timeline.anchor_report() if source_timeline else None
     _write_render_report(
         output_file,
         render,

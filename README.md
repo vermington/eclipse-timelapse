@@ -4,10 +4,10 @@ A non-destructive command-line pipeline that turns hand-held eclipse photographs
 into an aligned, timestamp-aware timelapse in square, portrait, or landscape
 formats.
 
-It detects the solar and lunar limbs, centres every exposure, reports soft
-frames, reconstructs a clean solar texture, and renders the eclipse from a
-globally fitted physical model. Source-anchor rendering passes exactly through
-every aligned photograph, while H.264 delivery and lossless FFV1 archival
+It detects the solar and lunar limbs, centres every exposure, and reports soft
+frames. The default source-anchored renderer uses only complete aligned
+photographs; optional synthetic modes can reconstruct a solar texture and use a
+globally fitted physical model. H.264 delivery and lossless FFV1 archival
 outputs are both supported. Output resolution, crop, duration, frame rate,
 quality, timing, and interpolation are configurable.
 
@@ -15,10 +15,11 @@ quality, timing, and interpolation are configurable.
 
 An ordinary image sequence assigns every photograph the same duration. That
 distorts an irregularly photographed event. The default clock-linear timeline
-instead preserves every photograph's real normalized capture time. If two
-photographs are 10 seconds apart, the generated eclipse is exactly 25% of the
-way between them after 2.5 seconds, 50% after 5 seconds, and 75% after 7.5
-seconds.
+instead places every photograph at its real normalized capture time. In the
+source-only default, if two photographs are 10 seconds apart, the first is held
+until their 5-second midpoint and the second is then held. With source anchors
+disabled, an interpolated mode is 25% of the way between them after 2.5 seconds,
+50% after 5 seconds, and 75% after 7.5 seconds.
 
 With source anchors disabled, the physical renderer holds the Sun fixed and
 moves a fitted lunar disc at constant measured velocity. A clean texture atlas
@@ -36,13 +37,12 @@ The project configuration also enables source anchors. Each original is given
 its own ordered output frame as close as possible to its ideal clock-linear
 position. At that frame, the renderer emits only the aligned 4:5 crop of that
 photograph—no texture atlas, synthetic lunar geometry, mask, local retouching,
-or blend. Between anchors, a single smoothly morphed eclipse silhouette reveals
-pixels from the endpoint photograph with more visible solar area, using the
-other endpoint only where it provides pixels farther from an occulting edge.
-There is no texture atlas, colour normalization, detail averaging, invented
-sunspot motion, or source-image residual blending in this mode. The JSON report
-records every assignment, timing offset, blur flag, and SHA-256 digest of the
-pre-encode aligned pixels.
+or blend. Between anchors, the nearest complete photograph is held unchanged
+until the following photograph becomes nearer in clock-linear time. There is no
+interpolated lunar boundary, crossfade, per-pixel mixing, texture atlas, colour
+normalization, detail averaging, or invented sunspot motion in this mode. The
+JSON report records every assignment, timing offset, blur flag, and SHA-256
+digest of the pre-encode aligned pixels.
 
 ## Requirements
 
@@ -164,7 +164,7 @@ uv run eclipse-timelapse render --include-blurry
 
 The threshold is applied during `analyze` or `run`. The render policy never
 deletes a photograph. With source anchors enabled, blur-flagged photographs
-still appear and participate as authentic source texture. With source anchors
+still appear as complete source frames. With source anchors
 disabled, the flag controls whether they participate in the video at all.
 
 ## Default workflow
@@ -174,13 +174,11 @@ disabled, the flag controls whether they participate in the video at all.
 3. Fit the solar limb and robustly disambiguate the occulting lunar limb.
 4. Score edge sharpness and flag frames below the configured threshold.
 5. Align the solar centre with a single affine resampling operation.
-6. Reconstruct available solar texture from the aligned observations.
-7. Fit one smooth lunar trajectory across the geometrically reliable frames.
-8. Assign every photograph a unique, minimum-error frame near its ideal
+6. Assign every photograph a unique, minimum-error frame near its ideal
    clock-linear position.
-9. Pass through the aligned source pixels at every anchor and smoothly render
-   the intervals between them.
-10. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.
+7. Fill the timeline by holding the nearest complete aligned photograph, with
+   no crossfade, mask interpolation, colour normalization, or pixel mixing.
+8. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.
 
 The original files are never edited. Blur-flagged photographs remain in the
 default source-anchored render.

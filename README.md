@@ -23,9 +23,11 @@ at constant measured velocity. A clean texture atlas assembled only from the
 aligned source photographs prevents photographed lunar edges from leaking into
 intermediate frames. Source brightness is retained, while colour is normalized
 before reconstruction so different in-camera processing does not create seams
-within the solar crescent. Optional compressed timelines remain available when
-a long real-world gap would otherwise occupy more of the finished film than
-desired.
+within the solar crescent. Compact solar features are tracked across reliable
+observations and rendered as a moving detail layer; when no sufficiently long,
+consistent track exists, detail remains neutral rather than acquiring invented
+motion. Optional compressed timelines remain available when a long real-world
+gap would otherwise occupy more of the finished film than desired.
 
 ## Requirements
 
@@ -59,8 +61,8 @@ sheet. `render` consumes the JSON report. `run` performs both steps.
 
 ## Aspect ratio and resolution
 
-The default is a 1:1 square. For an Instagram feed post, 4:5 portrait uses more
-screen area while keeping the eclipse visually prominent:
+The default is a 4:5 Instagram portrait, which uses more screen area while
+keeping the eclipse visually prominent:
 
 ```sh
 uv run eclipse-timelapse render \
@@ -73,15 +75,14 @@ uv run eclipse-timelapse render \
 `resolution` is the output width, so that command produces 1080×1350. A 9:16
 ratio is also accepted for Reels, as are arbitrary positive integer ratios.
 
-For a higher-resolution square render:
-
 CLI options override the tracked configuration without changing it:
 
 ```sh
 uv run eclipse-timelapse render \
+  --aspect-ratio 4:5 \
   --resolution 2160 \
   --crop-size 3000 \
-  --output output/eclipse_timelapse_2160.mp4
+  --output output/eclipse_timelapse_4x5_2160.mp4
 ```
 
 The source crop width and output width are independent. Keeping `crop-size` at

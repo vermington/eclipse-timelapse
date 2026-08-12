@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 
 import cv2
@@ -9,7 +10,11 @@ from eclipse_timelapse.model import AnalysisReport, EclipseModel, FrameAnalysis
 from eclipse_timelapse.render import (
     RenderError,
     _AlignedFrameCache,
+    _DetailFeature,
+    _DetailMotion,
     _exclusive_output_lock,
+    _fit_detail_motion,
+    _physical_frame,
     render_project,
 )
 
@@ -58,7 +63,7 @@ def test_physical_atlas_normalizes_source_colour_seams(tmp_path) -> None:
             )
         )
 
-    render = RenderConfig(resolution=64, crop_size=128)
+    render = RenderConfig(resolution=64, aspect_ratio="1:1", crop_size=128)
     cache = _AlignedFrameCache(tmp_path, tuple(frames), render)
     atlas = cache.prepare_physical_atlas(solar_radius=30.0)
     solar_pixels = cache.solar_mask > 0.5
@@ -66,6 +71,73 @@ def test_physical_atlas_normalizes_source_colour_seams(tmp_path) -> None:
     assert np.array_equal(atlas[:, :, 0][solar_pixels], atlas[:, :, 1][solar_pixels])
     assert np.array_equal(atlas[:, :, 1][solar_pixels], atlas[:, :, 2][solar_pixels])
     assert np.ptp(atlas[:, :, 0][solar_pixels]) <= 1
+
+    cache.atlas_detail = np.zeros((64, 64), dtype=np.float32)
+    cache.atlas_detail[31:34, 19:22] = -24.0
+    cache.detail_motion = _DetailMotion(
+        reference_time=frames[0].captured_at,
+        velocity_x_pixels_per_second=5.0,
+        supporting_frames=2,
+    )
+    model = EclipseModel(
+        reference_time=frames[0].captured_at,
+        solar_radius=30.0,
+        moon_radius=30.0,
+        moon_x_intercept=1_000.0,
+        moon_x_velocity=0.0,
+        moon_y_intercept=0.0,
+        moon_y_velocity=0.0,
+        supporting_frames=2,
+    )
+    first = _physical_frame(frames[0], frames[1], 0.0, cache, model)
+    second = _physical_frame(frames[0], frames[1], 1.0, cache, model)
+    interior = cache.solar_mask > 0.99
+    first_gray = cv2.cvtColor(first, cv2.COLOR_RGB2GRAY)
+    second_gray = cv2.cvtColor(second, cv2.COLOR_RGB2GRAY)
+    first_y, first_x = np.unravel_index(np.argmin(np.where(interior, first_gray, 255)), (64, 64))
+    second_y, second_x = np.unravel_index(
+        np.argmin(np.where(interior, second_gray, 255)),
+        (64, 64),
+    )
+    assert second_x - first_x == 5
+    assert second_y == first_y
+
+
+def test_detail_motion_follows_longest_confident_track() -> None:
+    reference_time = datetime(2026, 8, 12, 18, 0, 0)
+    features = []
+    for frame_index in range(12):
+        elapsed = frame_index * 100.0
+        features.extend(
+            [
+                _DetailFeature(
+                    frame_index=frame_index,
+                    elapsed_seconds=elapsed,
+                    x=-170.0 + 0.004 * elapsed,
+                    y=-80.0 + 0.006 * elapsed,
+                    strength=500.0,
+                ),
+                _DetailFeature(
+                    frame_index=frame_index,
+                    elapsed_seconds=elapsed,
+                    x=40.0,
+                    y=60.0,
+                    strength=20.0,
+                ),
+            ]
+        )
+
+    motion = _fit_detail_motion(
+        features,
+        reference_time=reference_time,
+        position_tolerance=1.0,
+    )
+
+    assert motion.supporting_frames == 12
+    assert motion.time_span_seconds == 1_100.0
+    assert motion.velocity_x_pixels_per_second == pytest.approx(0.004)
+    assert motion.velocity_y_pixels_per_second == pytest.approx(0.006)
+    assert motion.median_residual < 1e-6
 
 
 def test_small_video_render_is_decodable(tmp_path) -> None:
@@ -135,6 +207,9 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
 
     output = render_project(config, report)
 
+    render_report = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
+    assert render_report["solar_detail_motion"]["supporting_frames"] == 0
+
     capture = cv2.VideoCapture(str(output))
     decoded_frames = []
     while True:
@@ -145,13 +220,13 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
     capture.release()
     assert len(decoded_frames) == 4
 
-    grid_y, grid_x = np.mgrid[:64, :64]
-    solar_interior = np.hypot(grid_x - 32.0, grid_y - 32.0) <= 13.0
+    grid_y, grid_x = np.mgrid[:80, :64]
+    solar_interior = np.hypot(grid_x - 32.0, grid_y - 40.0) <= 13.0
     checked_frames = 0
     for index, image in enumerate(decoded_frames):
         progress = index / (len(decoded_frames) - 1)
         moon_x = 32.0 + (27.0 - 30.0 * progress) / 4.0
-        moon_interior = np.hypot(grid_x - moon_x, grid_y - 32.0) <= 17.0
+        moon_interior = np.hypot(grid_x - moon_x, grid_y - 40.0) <= 17.0
         visible_interior = solar_interior & ~moon_interior
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         if np.any(visible_interior):

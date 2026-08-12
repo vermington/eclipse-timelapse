@@ -9,10 +9,10 @@ minimum_component_pixels = 2000
 blur_threshold = 0.65
 
 [render]
-output = "output/eclipse_timelapse_1080.mp4"
+output = "output/eclipse_timelapse_strict_linear_4x5.mp4"
 resolution = 1080
-aspect_ratio = "1:1"
-crop_size = 2400
+aspect_ratio = "4:5"
+crop_size = 2000
 duration_seconds = 15.0
 frames_per_second = 30
 timeline = "linear"

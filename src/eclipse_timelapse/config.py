@@ -28,10 +28,10 @@ class AnalysisConfig:
 
 @dataclass(frozen=True, slots=True)
 class RenderConfig:
-    output: str = "output/eclipse_timelapse_1080.mp4"
+    output: str = "output/eclipse_timelapse_strict_linear_4x5.mp4"
     resolution: int = 1080
-    aspect_ratio: str = "1:1"
-    crop_size: int = 2400
+    aspect_ratio: str = "4:5"
+    crop_size: int = 2000
     duration_seconds: float = 15.0
     frames_per_second: int = 30
     timeline: str = "linear"

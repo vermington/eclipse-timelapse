@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eclipse-timelapse"
-version = "0.3.1"
+version = "0.4.0"
 description = "Align and render timestamp-aware eclipse timelapses"
 readme = "README.md"
 requires-python = ">=3.11"

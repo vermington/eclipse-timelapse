@@ -6,11 +6,11 @@ import hashlib
 import json
 import os
 import subprocess
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict
-from datetime import timedelta
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -26,6 +26,29 @@ ProgressCallback = Callable[[str], None]
 
 class RenderError(RuntimeError):
     """Raised when aligned rendering or video encoding fails."""
+
+
+@dataclass(frozen=True, slots=True)
+class _DetailFeature:
+    """One confidently detected high-frequency solar feature."""
+
+    frame_index: int
+    elapsed_seconds: float
+    x: float
+    y: float
+    strength: float
+
+
+@dataclass(frozen=True, slots=True)
+class _DetailMotion:
+    """Linear apparent motion of solar detail in output pixels."""
+
+    reference_time: datetime
+    velocity_x_pixels_per_second: float = 0.0
+    velocity_y_pixels_per_second: float = 0.0
+    supporting_frames: int = 0
+    time_span_seconds: float = 0.0
+    median_residual: float = 0.0
 
 
 def align_frame(
@@ -81,6 +104,8 @@ class _AlignedFrameCache:
         self.atlas: np.ndarray | None = None
         self.atlas_brightness: float | None = None
         self.atlas_chroma: np.ndarray | None = None
+        self.atlas_detail: np.ndarray | None = None
+        self.detail_motion = _DetailMotion(reference_time=frames[0].captured_at)
 
     def get(self, index: int) -> np.ndarray:
         if index in self.cache:
@@ -151,7 +176,7 @@ class _AlignedFrameCache:
         solar_radius: float,
         progress: ProgressCallback | None = None,
     ) -> np.ndarray:
-        """Build a colour-consistent texture without photographed lunar edges."""
+        """Build a colour-consistent texture whose reliable detail moves over time."""
         self.solar_mask = _disc_coverage(
             self.grid_x,
             self.grid_y,
@@ -160,61 +185,103 @@ class _AlignedFrameCache:
             solar_radius * self.scale,
         )
         solar_pixels = self.solar_mask > 0.0
-        detail_sum = np.zeros((self.output_height, self.output_width), dtype=np.float32)
-        detail_weight = np.zeros((self.output_height, self.output_width), dtype=np.float32)
         detail_blur_sigma = max(2.0, solar_radius * self.scale * 0.04)
         detail_edge_margin = max(2.0, solar_radius * self.scale * 0.04)
+        reference_time = self.frames[0].captured_at
+        features: list[_DetailFeature] = []
         frame_chromas: list[np.ndarray] = []
         for index, frame in enumerate(self.frames):
             image = self.get(index)
-            luminance = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
-            visible_pixels = solar_pixels & (luminance >= 30.0)
-            if np.any(visible_pixels):
-                normalized_luminance = np.clip(
-                    luminance * (128.0 / max(frame.brightness, 1.0)),
-                    0.0,
-                    255.0,
+            layer = _extract_solar_detail(
+                image,
+                frame,
+                solar_pixels,
+                blur_sigma=detail_blur_sigma,
+                edge_margin=detail_edge_margin,
+            )
+            if layer is not None:
+                detail, weight, chroma = layer
+                frame_chromas.append(chroma)
+                elapsed_seconds = (frame.captured_at - reference_time).total_seconds()
+                features.extend(
+                    _detect_detail_features(
+                        detail,
+                        weight,
+                        frame_index=index,
+                        elapsed_seconds=elapsed_seconds,
+                        center_x=self.output_width / 2.0,
+                        center_y=self.output_height / 2.0,
+                        solar_radius=solar_radius * self.scale,
+                    )
                 )
-                visible_float = visible_pixels.astype(np.float32)
-                local_average = cv2.GaussianBlur(
-                    normalized_luminance * visible_float,
-                    (0, 0),
-                    detail_blur_sigma,
-                ) / np.maximum(
-                    cv2.GaussianBlur(
-                        visible_float,
-                        (0, 0),
-                        detail_blur_sigma,
-                    ),
-                    1e-3,
-                )
-                detail = np.clip(normalized_luminance - local_average, -24.0, 24.0)
-                boundary_distance = cv2.distanceTransform(
-                    np.uint8(visible_pixels),
-                    cv2.DIST_L2,
-                    cv2.DIST_MASK_PRECISE,
-                )
-                weight = np.clip(boundary_distance - detail_edge_margin, 0.0, 12.0)
-                detail_sum += detail * weight
-                detail_weight += weight
-
-                frame_colour = np.median(image[visible_pixels], axis=0)
-                frame_colour_luminance = float(
-                    0.299 * frame_colour[0] + 0.587 * frame_colour[1] + 0.114 * frame_colour[2]
-                )
-                if frame_colour_luminance > 0:
-                    frame_chromas.append(frame_colour / frame_colour_luminance)
             if progress and (index % 10 == 0 or index + 1 == len(self.frames)):
-                progress(
-                    f"Building normalized texture atlas {index + 1:03d}/{len(self.frames):03d}"
+                progress(f"Tracking solar detail {index + 1:03d}/{len(self.frames):03d}")
+
+        if not frame_chromas:
+            raise RenderError("Could not estimate a usable solar colour")
+        output_solar_radius = solar_radius * self.scale
+        self.detail_motion = _fit_detail_motion(
+            features,
+            reference_time=reference_time,
+            position_tolerance=max(3.0, output_solar_radius * 0.032),
+            maximum_speed=max(0.02, output_solar_radius * 0.00028),
+        )
+
+        detail_sum = np.zeros((self.output_height, self.output_width), dtype=np.float32)
+        detail_weight = np.zeros((self.output_height, self.output_width), dtype=np.float32)
+        for index, frame in enumerate(self.frames):
+            image = self.get(index)
+            layer = _extract_solar_detail(
+                image,
+                frame,
+                solar_pixels,
+                blur_sigma=detail_blur_sigma,
+                edge_margin=detail_edge_margin,
+            )
+            if layer is not None:
+                detail, weight, _chroma = layer
+                elapsed_seconds = (frame.captured_at - reference_time).total_seconds()
+                transform = np.asarray(
+                    [
+                        [
+                            1.0,
+                            0.0,
+                            -self.detail_motion.velocity_x_pixels_per_second * elapsed_seconds,
+                        ],
+                        [
+                            0.0,
+                            1.0,
+                            -self.detail_motion.velocity_y_pixels_per_second * elapsed_seconds,
+                        ],
+                    ],
+                    dtype=np.float32,
                 )
+                canonical_detail = cv2.warpAffine(
+                    detail,
+                    transform,
+                    (self.output_width, self.output_height),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0.0,
+                )
+                canonical_weight = cv2.warpAffine(
+                    weight,
+                    transform,
+                    (self.output_width, self.output_height),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0.0,
+                )
+                detail_sum += canonical_detail * canonical_weight
+                detail_weight += canonical_weight
+            if progress and (index % 10 == 0 or index + 1 == len(self.frames)):
+                progress(f"Building moving texture atlas {index + 1:03d}/{len(self.frames):03d}")
 
         if not np.any(detail_weight > 0):
             raise RenderError("Could not reconstruct a usable solar texture atlas")
-        if not frame_chromas:
-            raise RenderError("Could not estimate a usable solar colour")
 
-        atlas_luminance = 128.0 + detail_sum / np.maximum(detail_weight, 1e-6)
+        self.atlas_detail = detail_sum / np.maximum(detail_weight, 1e-6)
+        atlas_luminance = 128.0 + self.atlas_detail
         atlas_luminance[~solar_pixels] = 0.0
         atlas_gray = np.uint8(np.clip(np.rint(atlas_luminance), 0, 255))
         atlas = np.repeat(atlas_gray[:, :, None], 3, axis=2)
@@ -227,6 +294,209 @@ class _AlignedFrameCache:
         self.atlas_brightness = max(float(np.median(atlas_luminance[solar_pixels])), 1.0)
         self.atlas = atlas
         return atlas
+
+
+def _extract_solar_detail(
+    image: np.ndarray,
+    frame: FrameAnalysis,
+    solar_pixels: np.ndarray,
+    *,
+    blur_sigma: float,
+    edge_margin: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Separate reliable high-frequency detail from exposure and colour."""
+    luminance = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    visible_pixels = solar_pixels & (luminance >= 30.0)
+    if not np.any(visible_pixels):
+        return None
+
+    normalized_luminance = np.clip(
+        luminance * (128.0 / max(frame.brightness, 1.0)),
+        0.0,
+        255.0,
+    )
+    visible_float = visible_pixels.astype(np.float32)
+    local_average = cv2.GaussianBlur(
+        normalized_luminance * visible_float,
+        (0, 0),
+        blur_sigma,
+    ) / np.maximum(
+        cv2.GaussianBlur(visible_float, (0, 0), blur_sigma),
+        1e-3,
+    )
+    detail = np.clip(normalized_luminance - local_average, -24.0, 24.0)
+    boundary_distance = cv2.distanceTransform(
+        np.uint8(visible_pixels),
+        cv2.DIST_L2,
+        cv2.DIST_MASK_PRECISE,
+    )
+    weight = np.clip(boundary_distance - edge_margin, 0.0, 12.0)
+
+    frame_colour = np.median(image[visible_pixels], axis=0)
+    frame_colour_luminance = float(
+        0.299 * frame_colour[0] + 0.587 * frame_colour[1] + 0.114 * frame_colour[2]
+    )
+    if frame_colour_luminance <= 0:
+        return None
+    return detail, weight, frame_colour / frame_colour_luminance
+
+
+def _detect_detail_features(
+    detail: np.ndarray,
+    weight: np.ndarray,
+    *,
+    frame_index: int,
+    elapsed_seconds: float,
+    center_x: float,
+    center_y: float,
+    solar_radius: float,
+) -> list[_DetailFeature]:
+    """Detect compact dark features while excluding all photographed limbs."""
+    candidate = np.uint8((detail <= -3.5) & (weight > 0.0))
+    count, labels, statistics, centroids = cv2.connectedComponentsWithStats(
+        candidate,
+        connectivity=8,
+    )
+    scale_area = (solar_radius / 220.0) ** 2
+    minimum_area = max(2, round(3.0 * scale_area))
+    maximum_area = max(100, round(solar_radius**2 * 0.015))
+    minimum_strength = max(12.0, 20.0 * scale_area)
+    features: list[_DetailFeature] = []
+    for component_index in range(1, count):
+        area = int(statistics[component_index, cv2.CC_STAT_AREA])
+        if not minimum_area <= area <= maximum_area:
+            continue
+        component = labels == component_index
+        strength = float(np.sum(-detail[component]))
+        if strength < minimum_strength:
+            continue
+        feature_x, feature_y = centroids[component_index]
+        features.append(
+            _DetailFeature(
+                frame_index=frame_index,
+                elapsed_seconds=elapsed_seconds,
+                x=float(feature_x - center_x),
+                y=float(feature_y - center_y),
+                strength=strength,
+            )
+        )
+    features.sort(key=lambda feature: feature.strength, reverse=True)
+    return features[:8]
+
+
+def _fit_detail_motion(
+    features: list[_DetailFeature],
+    *,
+    reference_time: datetime,
+    position_tolerance: float = 7.0,
+    maximum_speed: float = 0.06,
+) -> _DetailMotion:
+    """Fit the longest consistent feature track with deterministic RANSAC."""
+    by_frame: dict[int, list[_DetailFeature]] = defaultdict(list)
+    for feature in features:
+        by_frame[feature.frame_index].append(feature)
+    if len(by_frame) < 8 or len(features) < 8:
+        return _DetailMotion(reference_time=reference_time)
+
+    def select_track(
+        velocity_x: float,
+        velocity_y: float,
+        intercept_x: float,
+        intercept_y: float,
+    ) -> list[_DetailFeature]:
+        selected: list[_DetailFeature] = []
+        for frame_features in by_frame.values():
+            elapsed = frame_features[0].elapsed_seconds
+            predicted_x = intercept_x + velocity_x * elapsed
+            predicted_y = intercept_y + velocity_y * elapsed
+            nearest = min(
+                frame_features,
+                key=lambda feature: np.hypot(
+                    feature.x - predicted_x,
+                    feature.y - predicted_y,
+                ),
+            )
+            distance = np.hypot(nearest.x - predicted_x, nearest.y - predicted_y)
+            if distance <= position_tolerance:
+                selected.append(nearest)
+        return selected
+
+    generator = np.random.default_rng(20260812)
+    best_track: list[_DetailFeature] = []
+    best_score = (0, 0.0, 0.0)
+    for first_index, second_index in generator.integers(
+        0,
+        len(features),
+        size=(4_000, 2),
+    ):
+        first = features[int(first_index)]
+        second = features[int(second_index)]
+        elapsed_delta = second.elapsed_seconds - first.elapsed_seconds
+        if first.frame_index == second.frame_index or abs(elapsed_delta) < 30.0:
+            continue
+        velocity_x = (second.x - first.x) / elapsed_delta
+        velocity_y = (second.y - first.y) / elapsed_delta
+        if np.hypot(velocity_x, velocity_y) > maximum_speed:
+            continue
+        intercept_x = first.x - velocity_x * first.elapsed_seconds
+        intercept_y = first.y - velocity_y * first.elapsed_seconds
+        track = select_track(velocity_x, velocity_y, intercept_x, intercept_y)
+        if not track:
+            continue
+        time_span = max(feature.elapsed_seconds for feature in track) - min(
+            feature.elapsed_seconds for feature in track
+        )
+        strength = float(sum(np.log1p(feature.strength) for feature in track))
+        score = (len(track), time_span, strength)
+        if score > best_score:
+            best_score = score
+            best_track = track
+
+    if len(best_track) < 8:
+        return _DetailMotion(reference_time=reference_time)
+
+    velocity_x = velocity_y = intercept_x = intercept_y = 0.0
+    for _iteration in range(3):
+        elapsed = np.asarray([feature.elapsed_seconds for feature in best_track])
+        design = np.column_stack((elapsed, np.ones(len(best_track))))
+        x_values = np.asarray([feature.x for feature in best_track])
+        y_values = np.asarray([feature.y for feature in best_track])
+        velocity_x, intercept_x = np.linalg.lstsq(design, x_values, rcond=None)[0]
+        velocity_y, intercept_y = np.linalg.lstsq(design, y_values, rcond=None)[0]
+        best_track = select_track(
+            float(velocity_x),
+            float(velocity_y),
+            float(intercept_x),
+            float(intercept_y),
+        )
+        if len(best_track) < 8:
+            return _DetailMotion(reference_time=reference_time)
+
+    time_span = max(feature.elapsed_seconds for feature in best_track) - min(
+        feature.elapsed_seconds for feature in best_track
+    )
+    residuals = [
+        np.hypot(
+            feature.x - (intercept_x + velocity_x * feature.elapsed_seconds),
+            feature.y - (intercept_y + velocity_y * feature.elapsed_seconds),
+        )
+        for feature in best_track
+    ]
+    median_residual = float(np.median(residuals))
+    if (
+        time_span < 300.0
+        or median_residual > position_tolerance * 0.75
+        or np.hypot(velocity_x, velocity_y) > maximum_speed
+    ):
+        return _DetailMotion(reference_time=reference_time)
+    return _DetailMotion(
+        reference_time=reference_time,
+        velocity_x_pixels_per_second=float(velocity_x),
+        velocity_y_pixels_per_second=float(velocity_y),
+        supporting_frames=len(best_track),
+        time_span_seconds=float(time_span),
+        median_residual=median_residual,
+    )
 
 
 def render_project(
@@ -389,7 +659,15 @@ def _render_project_unlocked(
             cv2.cvtColor(poster, cv2.COLOR_RGB2BGR),
             [cv2.IMWRITE_JPEG_QUALITY, 95],
         )
-    _write_render_report(output_file, render, included, excluded, total_frames)
+    detail_motion = cache.detail_motion if render.interpolation == "physical" else None
+    _write_render_report(
+        output_file,
+        render,
+        included,
+        excluded,
+        total_frames,
+        detail_motion=detail_motion,
+    )
     return output_file
 
 
@@ -476,6 +754,7 @@ def _physical_frame(
     assert cache.atlas is not None
     assert cache.atlas_brightness is not None
     assert cache.atlas_chroma is not None
+    assert cache.atlas_detail is not None
     assert cache.solar_mask is not None
 
     interval_seconds = (right_frame.captured_at - left_frame.captured_at).total_seconds()
@@ -494,8 +773,38 @@ def _physical_frame(
 
     target_brightness = left_frame.brightness * (1.0 - alpha) + right_frame.brightness * alpha
     brightness_gain = target_brightness / cache.atlas_brightness
-    image = cache.atlas.astype(np.float32) * brightness_gain
-    image *= cache.atlas_chroma[None, None, :]
+    detail_elapsed = (captured_at - cache.detail_motion.reference_time).total_seconds()
+    if (
+        cache.detail_motion.velocity_x_pixels_per_second
+        or cache.detail_motion.velocity_y_pixels_per_second
+    ):
+        transform = np.asarray(
+            [
+                [
+                    1.0,
+                    0.0,
+                    cache.detail_motion.velocity_x_pixels_per_second * detail_elapsed,
+                ],
+                [
+                    0.0,
+                    1.0,
+                    cache.detail_motion.velocity_y_pixels_per_second * detail_elapsed,
+                ],
+            ],
+            dtype=np.float32,
+        )
+        moving_detail = cv2.warpAffine(
+            cache.atlas_detail,
+            transform,
+            (cache.output_width, cache.output_height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0.0,
+        )
+    else:
+        moving_detail = cache.atlas_detail
+    texture_luminance = 128.0 + moving_detail
+    image = texture_luminance[:, :, None] * brightness_gain * cache.atlas_chroma[None, None, :]
     image *= eclipse_mask[:, :, None]
     return np.uint8(np.clip(np.rint(image), 0, 255))
 
@@ -572,6 +881,8 @@ def _write_render_report(
     included: tuple[FrameAnalysis, ...],
     excluded: tuple[FrameAnalysis, ...],
     total_frames: int,
+    *,
+    detail_motion: _DetailMotion | None = None,
 ) -> None:
     digest = hashlib.sha256()
     with output_file.open("rb") as video_file:
@@ -585,5 +896,9 @@ def _write_render_report(
         "included_source_frames": [frame.filename for frame in included],
         "excluded_blurry_frames": [frame.filename for frame in excluded],
     }
+    if detail_motion is not None:
+        motion_payload = asdict(detail_motion)
+        motion_payload["reference_time"] = detail_motion.reference_time.isoformat()
+        payload["solar_detail_motion"] = motion_payload
     report_file = output_file.with_suffix(".json")
     report_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

@@ -1,3 +1,3 @@
 """Tools for producing aligned, timestamp-aware eclipse timelapses."""
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"

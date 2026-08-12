@@ -21,8 +21,11 @@ seconds.
 The default physical renderer holds the Sun fixed and moves a fitted lunar disc
 at constant measured velocity. A clean texture atlas assembled only from the
 aligned source photographs prevents photographed lunar edges from leaking into
-intermediate frames. Optional compressed timelines remain available when a long
-real-world gap would otherwise occupy more of the finished film than desired.
+intermediate frames. Source brightness is retained, while colour is normalized
+before reconstruction so different in-camera processing does not create seams
+within the solar crescent. Optional compressed timelines remain available when
+a long real-world gap would otherwise occupy more of the finished film than
+desired.
 
 ## Requirements
 
@@ -99,6 +102,9 @@ uv run eclipse-timelapse render --exclude-blurry
 Supported timeline modes are `uniform`, `linear`, `capped`, and `logarithmic`.
 `linear` is the default and preserves clock time exactly. Supported interpolation
 modes are `physical` (default), `morph`, `geometry`, and `crossfade`.
+Every timeline mode uses a linear fraction within each pair of photographs; the
+mode changes only how much of the finished clip is allocated to each capture
+gap.
 
 ## Blur controls
 

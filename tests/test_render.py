@@ -6,7 +6,12 @@ import pytest
 
 from eclipse_timelapse.config import AnalysisConfig, InputConfig, ProjectConfig, RenderConfig
 from eclipse_timelapse.model import AnalysisReport, EclipseModel, FrameAnalysis
-from eclipse_timelapse.render import RenderError, _exclusive_output_lock, render_project
+from eclipse_timelapse.render import (
+    RenderError,
+    _AlignedFrameCache,
+    _exclusive_output_lock,
+    render_project,
+)
 
 
 def test_output_lock_rejects_concurrent_renderer(tmp_path) -> None:
@@ -18,6 +23,49 @@ def test_output_lock_rejects_concurrent_renderer(tmp_path) -> None:
         _exclusive_output_lock(output),
     ):
         pass
+
+
+def test_physical_atlas_normalizes_source_colour_seams(tmp_path) -> None:
+    frames = []
+    colours = ((80, 100, 160), (160, 100, 80))
+    for index, colour in enumerate(colours):
+        image = np.zeros((128, 128, 3), dtype=np.uint8)
+        cv2.circle(image, (64, 64), 30, colour, thickness=-1)
+        if index == 0:
+            image[:, 64:] = 0
+        else:
+            image[:, :64] = 0
+        filename = f"colour-{index}.png"
+        cv2.imwrite(str(tmp_path / filename), image)
+        frames.append(
+            FrameAnalysis(
+                sequence=index + 1,
+                filename=filename,
+                captured_at=datetime(2026, 8, 12) + timedelta(seconds=index),
+                width=128,
+                height=128,
+                center_x=64.0,
+                center_y=64.0,
+                radius=30.0,
+                moon_center_x=64.0,
+                moon_center_y=64.0,
+                moon_radius=30.0,
+                moon_fit_error=0.1,
+                bright_pixels=1_000,
+                brightness=100.0,
+                sharpness=2.0,
+                blurry=False,
+            )
+        )
+
+    render = RenderConfig(resolution=64, crop_size=128)
+    cache = _AlignedFrameCache(tmp_path, tuple(frames), render)
+    atlas = cache.prepare_physical_atlas(solar_radius=30.0)
+    solar_pixels = cache.solar_mask > 0.5
+
+    assert np.array_equal(atlas[:, :, 0][solar_pixels], atlas[:, :, 1][solar_pixels])
+    assert np.array_equal(atlas[:, :, 1][solar_pixels], atlas[:, :, 2][solar_pixels])
+    assert np.ptp(atlas[:, :, 0][solar_pixels]) <= 1
 
 
 def test_small_video_render_is_decodable(tmp_path) -> None:

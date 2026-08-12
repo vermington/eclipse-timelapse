@@ -80,6 +80,7 @@ class _AlignedFrameCache:
         self.solar_mask: np.ndarray | None = None
         self.atlas: np.ndarray | None = None
         self.atlas_brightness: float | None = None
+        self.atlas_chroma: np.ndarray | None = None
 
     def get(self, index: int) -> np.ndarray:
         if index in self.cache:
@@ -150,8 +151,7 @@ class _AlignedFrameCache:
         solar_radius: float,
         progress: ProgressCallback | None = None,
     ) -> np.ndarray:
-        """Build a clean solar texture with photographed lunar edges removed."""
-        atlas = self.build_atlas(progress).copy()
+        """Build a colour-consistent texture without photographed lunar edges."""
         self.solar_mask = _disc_coverage(
             self.grid_x,
             self.grid_y,
@@ -159,17 +159,72 @@ class _AlignedFrameCache:
             self.output_height / 2.0,
             solar_radius * self.scale,
         )
-        luminance = cv2.cvtColor(atlas, cv2.COLOR_RGB2GRAY)
         solar_pixels = self.solar_mask > 0.0
-        valid_pixels = solar_pixels & (luminance >= 50)
-        if not np.any(valid_pixels):
-            raise RenderError("Could not reconstruct a usable solar texture atlas")
+        detail_sum = np.zeros((self.output_height, self.output_width), dtype=np.float32)
+        detail_weight = np.zeros((self.output_height, self.output_width), dtype=np.float32)
+        detail_blur_sigma = max(2.0, solar_radius * self.scale * 0.04)
+        detail_edge_margin = max(2.0, solar_radius * self.scale * 0.04)
+        frame_chromas: list[np.ndarray] = []
+        for index, frame in enumerate(self.frames):
+            image = self.get(index)
+            luminance = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
+            visible_pixels = solar_pixels & (luminance >= 30.0)
+            if np.any(visible_pixels):
+                normalized_luminance = np.clip(
+                    luminance * (128.0 / max(frame.brightness, 1.0)),
+                    0.0,
+                    255.0,
+                )
+                visible_float = visible_pixels.astype(np.float32)
+                local_average = cv2.GaussianBlur(
+                    normalized_luminance * visible_float,
+                    (0, 0),
+                    detail_blur_sigma,
+                ) / np.maximum(
+                    cv2.GaussianBlur(
+                        visible_float,
+                        (0, 0),
+                        detail_blur_sigma,
+                    ),
+                    1e-3,
+                )
+                detail = np.clip(normalized_luminance - local_average, -24.0, 24.0)
+                boundary_distance = cv2.distanceTransform(
+                    np.uint8(visible_pixels),
+                    cv2.DIST_L2,
+                    cv2.DIST_MASK_PRECISE,
+                )
+                weight = np.clip(boundary_distance - detail_edge_margin, 0.0, 12.0)
+                detail_sum += detail * weight
+                detail_weight += weight
 
-        median_colour = np.median(atlas[valid_pixels], axis=0)
-        missing_pixels = solar_pixels & ~valid_pixels
-        atlas[missing_pixels] = np.uint8(np.clip(np.rint(median_colour), 0, 255))
-        clean_luminance = cv2.cvtColor(atlas, cv2.COLOR_RGB2GRAY)
-        self.atlas_brightness = max(float(np.median(clean_luminance[solar_pixels])), 1.0)
+                frame_colour = np.median(image[visible_pixels], axis=0)
+                frame_colour_luminance = float(
+                    0.299 * frame_colour[0] + 0.587 * frame_colour[1] + 0.114 * frame_colour[2]
+                )
+                if frame_colour_luminance > 0:
+                    frame_chromas.append(frame_colour / frame_colour_luminance)
+            if progress and (index % 10 == 0 or index + 1 == len(self.frames)):
+                progress(
+                    f"Building normalized texture atlas {index + 1:03d}/{len(self.frames):03d}"
+                )
+
+        if not np.any(detail_weight > 0):
+            raise RenderError("Could not reconstruct a usable solar texture atlas")
+        if not frame_chromas:
+            raise RenderError("Could not estimate a usable solar colour")
+
+        atlas_luminance = 128.0 + detail_sum / np.maximum(detail_weight, 1e-6)
+        atlas_luminance[~solar_pixels] = 0.0
+        atlas_gray = np.uint8(np.clip(np.rint(atlas_luminance), 0, 255))
+        atlas = np.repeat(atlas_gray[:, :, None], 3, axis=2)
+
+        atlas_chroma = np.median(np.asarray(frame_chromas), axis=0)
+        chroma_luminance = float(
+            0.299 * atlas_chroma[0] + 0.587 * atlas_chroma[1] + 0.114 * atlas_chroma[2]
+        )
+        self.atlas_chroma = atlas_chroma / chroma_luminance
+        self.atlas_brightness = max(float(np.median(atlas_luminance[solar_pixels])), 1.0)
         self.atlas = atlas
         return atlas
 
@@ -420,6 +475,7 @@ def _physical_frame(
     """Render one exposure from a fixed Sun and a clock-linear lunar trajectory."""
     assert cache.atlas is not None
     assert cache.atlas_brightness is not None
+    assert cache.atlas_chroma is not None
     assert cache.solar_mask is not None
 
     interval_seconds = (right_frame.captured_at - left_frame.captured_at).total_seconds()
@@ -439,6 +495,7 @@ def _physical_frame(
     target_brightness = left_frame.brightness * (1.0 - alpha) + right_frame.brightness * alpha
     brightness_gain = target_brightness / cache.atlas_brightness
     image = cache.atlas.astype(np.float32) * brightness_gain
+    image *= cache.atlas_chroma[None, None, :]
     image *= eclipse_mask[:, :, None]
     return np.uint8(np.clip(np.rint(image), 0, 255))
 

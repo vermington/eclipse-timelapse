@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eclipse-timelapse"
+version = "0.1.0"
+description = "Align and render timestamp-aware eclipse timelapses"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+packages = []

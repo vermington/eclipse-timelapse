@@ -1,0 +1,26 @@
+# Original photographs and generated media
+*.JPG
+*.JPEG
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.mp4
+*.mov
+
+# Generated working directories
+output/
+work/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/

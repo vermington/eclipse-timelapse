@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from eclipse_timelapse.config import AnalysisConfig, InputConfig, ProjectConfig, RenderConfig
-from eclipse_timelapse.model import AnalysisReport, FrameAnalysis
+from eclipse_timelapse.model import AnalysisReport, EclipseModel, FrameAnalysis
 from eclipse_timelapse.render import RenderError, _exclusive_output_lock, render_project
 
 
@@ -45,6 +45,7 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
                 moon_radius=62.0,
                 moon_fit_error=0.1,
                 bright_pixels=5_000,
+                brightness=140.0,
                 sharpness=2.0,
                 blurry=False,
             )
@@ -60,28 +61,52 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
             crop_size=256,
             duration_seconds=0.5,
             frames_per_second=8,
-            interpolation="morph",
+            interpolation="physical",
             preset="ultrafast",
         ),
     )
     report = AnalysisReport(
-        schema_version=2,
+        schema_version=3,
         source_directory=".",
         pattern="frame-*.jpg",
         detection_threshold=20,
         blur_threshold=0.65,
         median_radius=60.0,
+        eclipse_model=EclipseModel(
+            reference_time=frames[0].captured_at,
+            solar_radius=60.0,
+            moon_radius=62.0,
+            moon_x_intercept=27.0,
+            moon_x_velocity=-3.0,
+            moon_y_intercept=0.0,
+            moon_y_velocity=0.0,
+            supporting_frames=2,
+        ),
         frames=tuple(frames),
     )
 
     output = render_project(config, report)
 
     capture = cv2.VideoCapture(str(output))
-    decoded = 0
+    decoded_frames = []
     while True:
-        available, _image = capture.read()
+        available, image = capture.read()
         if not available:
             break
-        decoded += 1
+        decoded_frames.append(image)
     capture.release()
-    assert decoded == 4
+    assert len(decoded_frames) == 4
+
+    grid_y, grid_x = np.mgrid[:64, :64]
+    solar_interior = np.hypot(grid_x - 32.0, grid_y - 32.0) <= 13.0
+    checked_frames = 0
+    for index, image in enumerate(decoded_frames):
+        progress = index / (len(decoded_frames) - 1)
+        moon_x = 32.0 + (27.0 - 30.0 * progress) / 4.0
+        moon_interior = np.hypot(grid_x - moon_x, grid_y - 32.0) <= 17.0
+        visible_interior = solar_interior & ~moon_interior
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if np.any(visible_interior):
+            checked_frames += 1
+            assert np.all(gray[visible_interior] > 30)
+    assert checked_frames >= 2

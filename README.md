@@ -5,22 +5,24 @@ into an aligned, timestamp-aware timelapse in square, portrait, or landscape
 formats.
 
 It detects the solar and lunar limbs, centres every exposure, reports soft
-frames, compresses irregular capture gaps, morphs between observed crescent
-silhouettes, and produces an H.264 MP4. Output resolution, crop, duration, frame
-rate, quality, timing, and interpolation are configurable.
+frames, reconstructs a clean solar texture, and renders the eclipse from a
+globally fitted physical model into an H.264 MP4. Output resolution, crop,
+duration, frame rate, quality, timing, and interpolation are configurable.
 
 ## Why this exists
 
 An ordinary image sequence assigns every photograph the same duration. That
-distorts an irregularly photographed event. A strictly timestamp-linear video
-has the opposite problem: one long capture gap can freeze the screen for several
+distorts an irregularly photographed event. The default clock-linear timeline
+instead anchors every photograph at its real normalized capture time. If two
+photographs are 10 seconds apart, the generated eclipse is exactly 25% of the
+way between them after 2.5 seconds, 50% after 5 seconds, and 75% after 7.5
 seconds.
 
-The default logarithmic timeline keeps the temporal character of the sequence
-while compressing outlying gaps. Signed-distance morphing prevents the doubled
-lunar edge that a normal crossfade creates. A texture atlas assembled only from
-the aligned source photographs fills the small regions revealed between two
-exposures.
+The default physical renderer holds the Sun fixed and moves a fitted lunar disc
+at constant measured velocity. A clean texture atlas assembled only from the
+aligned source photographs prevents photographed lunar edges from leaking into
+intermediate frames. Optional compressed timelines remain available when a long
+real-world gap would otherwise occupy more of the finished film than desired.
 
 ## Requirements
 
@@ -95,8 +97,8 @@ uv run eclipse-timelapse render --exclude-blurry
 ```
 
 Supported timeline modes are `uniform`, `linear`, `capped`, and `logarithmic`.
-Supported interpolation modes are `morph` (default), `geometry`, and
-`crossfade`.
+`linear` is the default and preserves clock time exactly. Supported interpolation
+modes are `physical` (default), `morph`, `geometry`, and `crossfade`.
 
 ## Blur controls
 
@@ -122,8 +124,10 @@ video.
 4. Score edge sharpness and flag frames below the configured threshold.
 5. Align the solar centre with a single affine resampling operation.
 6. Reconstruct available solar texture from the aligned observations.
-7. Map capture gaps to a compressed visual timeline and morph silhouettes.
-8. Stream RGB frames directly into H.264 with BT.709 colour metadata.
+7. Fit one smooth lunar trajectory across the geometrically reliable frames.
+8. Map each photograph to its exact clock-linear position and render analytic
+   solar and lunar masks.
+9. Stream RGB frames directly into H.264 with BT.709 colour metadata.
 
 The original photographs are never edited. Blurry frames are reported and
 excluded from the default render, but never deleted.

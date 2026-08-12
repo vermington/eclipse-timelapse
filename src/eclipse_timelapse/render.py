@@ -10,6 +10,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import timedelta
 from pathlib import Path
 
 import cv2
@@ -17,7 +18,7 @@ import imageio_ffmpeg
 import numpy as np
 
 from eclipse_timelapse.config import ProjectConfig, RenderConfig, output_dimensions
-from eclipse_timelapse.model import AnalysisReport, FrameAnalysis
+from eclipse_timelapse.model import AnalysisReport, EclipseModel, FrameAnalysis
 from eclipse_timelapse.timeline import frame_blend, timeline_positions
 
 ProgressCallback = Callable[[str], None]
@@ -78,6 +79,7 @@ class _AlignedFrameCache:
         self.scale = render.resolution / render.crop_size
         self.solar_mask: np.ndarray | None = None
         self.atlas: np.ndarray | None = None
+        self.atlas_brightness: float | None = None
 
     def get(self, index: int) -> np.ndarray:
         if index in self.cache:
@@ -143,6 +145,34 @@ class _AlignedFrameCache:
         self.atlas = atlas
         return atlas
 
+    def prepare_physical_atlas(
+        self,
+        solar_radius: float,
+        progress: ProgressCallback | None = None,
+    ) -> np.ndarray:
+        """Build a clean solar texture with photographed lunar edges removed."""
+        atlas = self.build_atlas(progress).copy()
+        self.solar_mask = _disc_coverage(
+            self.grid_x,
+            self.grid_y,
+            self.output_width / 2.0,
+            self.output_height / 2.0,
+            solar_radius * self.scale,
+        )
+        luminance = cv2.cvtColor(atlas, cv2.COLOR_RGB2GRAY)
+        solar_pixels = self.solar_mask > 0.0
+        valid_pixels = solar_pixels & (luminance >= 50)
+        if not np.any(valid_pixels):
+            raise RenderError("Could not reconstruct a usable solar texture atlas")
+
+        median_colour = np.median(atlas[valid_pixels], axis=0)
+        missing_pixels = solar_pixels & ~valid_pixels
+        atlas[missing_pixels] = np.uint8(np.clip(np.rint(median_colour), 0, 255))
+        clean_luminance = cv2.cvtColor(atlas, cv2.COLOR_RGB2GRAY)
+        self.atlas_brightness = max(float(np.median(clean_luminance[solar_pixels])), 1.0)
+        self.atlas = atlas
+        return atlas
+
 
 def render_project(
     config: ProjectConfig,
@@ -180,7 +210,9 @@ def _render_project_unlocked(
     output_file = config.output_file
     temporary_file = output_file.with_name(f".{output_file.stem}.partial{output_file.suffix}")
     cache = _AlignedFrameCache(config.input_directory, included, render)
-    if render.interpolation == "morph":
+    if render.interpolation == "physical":
+        cache.prepare_physical_atlas(report.eclipse_model.solar_radius, progress)
+    elif render.interpolation == "morph":
         cache.build_atlas(progress)
     total_frames = max(2, round(render.duration_seconds * render.frames_per_second))
     output_width, output_height = output_dimensions(render)
@@ -229,32 +261,41 @@ def _render_project_unlocked(
         for output_index in range(total_frames):
             video_progress = output_index / (total_frames - 1)
             left, right, alpha = frame_blend(positions, video_progress)
-            left_image = cache.get(left)
-            if right == left or alpha <= 0:
-                image = left_image
-            elif alpha >= 1:
-                image = cache.get(right)
-            elif render.interpolation == "morph":
-                image = _distance_morph_blend(
-                    left_image,
-                    cache.get(right),
-                    left,
-                    right,
-                    alpha,
-                    cache,
-                )
-            elif render.interpolation == "geometry":
-                image = _geometry_blend(
-                    left_image,
-                    cache.get(right),
+            if render.interpolation == "physical":
+                image = _physical_frame(
                     included[left],
                     included[right],
                     alpha,
                     cache,
-                    report.median_radius,
+                    report.eclipse_model,
                 )
             else:
-                image = cv2.addWeighted(left_image, 1.0 - alpha, cache.get(right), alpha, 0.0)
+                left_image = cache.get(left)
+                if right == left or alpha <= 0:
+                    image = left_image
+                elif alpha >= 1:
+                    image = cache.get(right)
+                elif render.interpolation == "morph":
+                    image = _distance_morph_blend(
+                        left_image,
+                        cache.get(right),
+                        left,
+                        right,
+                        alpha,
+                        cache,
+                    )
+                elif render.interpolation == "geometry":
+                    image = _geometry_blend(
+                        left_image,
+                        cache.get(right),
+                        included[left],
+                        included[right],
+                        alpha,
+                        cache,
+                        report.median_radius,
+                    )
+                else:
+                    image = cv2.addWeighted(left_image, 1.0 - alpha, cache.get(right), alpha, 0.0)
             if output_index == total_frames // 2:
                 poster = image.copy()
             process.stdin.write(image.tobytes())
@@ -367,6 +408,39 @@ def _distance_morph_blend(
         blended[missing] = cache.atlas[missing]
     blended *= target_mask[:, :, None]
     return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _physical_frame(
+    left_frame: FrameAnalysis,
+    right_frame: FrameAnalysis,
+    alpha: float,
+    cache: _AlignedFrameCache,
+    model: EclipseModel,
+) -> np.ndarray:
+    """Render one exposure from a fixed Sun and a clock-linear lunar trajectory."""
+    assert cache.atlas is not None
+    assert cache.atlas_brightness is not None
+    assert cache.solar_mask is not None
+
+    interval_seconds = (right_frame.captured_at - left_frame.captured_at).total_seconds()
+    captured_at = left_frame.captured_at + timedelta(seconds=interval_seconds * alpha)
+    moon_offset_x, moon_offset_y = model.moon_center_at(captured_at)
+    moon_x = cache.output_width / 2.0 + moon_offset_x * cache.scale
+    moon_y = cache.output_height / 2.0 + moon_offset_y * cache.scale
+    moon_mask = _disc_coverage(
+        cache.grid_x,
+        cache.grid_y,
+        moon_x,
+        moon_y,
+        model.moon_radius * cache.scale,
+    )
+    eclipse_mask = cache.solar_mask * (1.0 - moon_mask)
+
+    target_brightness = left_frame.brightness * (1.0 - alpha) + right_frame.brightness * alpha
+    brightness_gain = target_brightness / cache.atlas_brightness
+    image = cache.atlas.astype(np.float32) * brightness_gain
+    image *= eclipse_mask[:, :, None]
+    return np.uint8(np.clip(np.rint(image), 0, 255))
 
 
 def _geometry_blend(

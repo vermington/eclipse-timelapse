@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ import numpy as np
 from PIL import ExifTags, Image, ImageDraw, ImageOps
 
 from eclipse_timelapse.config import ProjectConfig
-from eclipse_timelapse.model import AnalysisReport, FrameAnalysis
+from eclipse_timelapse.model import AnalysisReport, EclipseModel, FrameAnalysis
 
 ProgressCallback = Callable[[str], None]
 EXIF_IFD = ExifTags.IFD.Exif
@@ -108,6 +109,7 @@ def detect_frame(
         "moon_radius": moon_radius,
         "moon_fit_error": moon_fit_error,
         "bright_pixels": bright_pixels,
+        "brightness": brightness,
         "sharpness": sharpness,
     }
 
@@ -148,12 +150,13 @@ def analyse_project(
         )
 
     report = AnalysisReport(
-        schema_version=2,
+        schema_version=3,
         source_directory=config.input.directory,
         pattern=config.input.pattern,
         detection_threshold=config.analysis.detection_threshold,
         blur_threshold=config.analysis.blur_threshold,
         median_radius=float(np.median([frame.radius for frame in frames])),
+        eclipse_model=_fit_eclipse_model(frames),
         frames=tuple(frames),
     )
     work_directory = config.work_directory
@@ -179,6 +182,7 @@ def _write_csv(report: AnalysisReport, filename: Path) -> None:
         "moon_radius",
         "moon_fit_error",
         "bright_pixels",
+        "brightness",
         "sharpness",
         "blurry",
     ]
@@ -194,6 +198,7 @@ def _write_csv(report: AnalysisReport, filename: Path) -> None:
             row["moon_center_y"] = f"{frame.moon_center_y:.3f}"
             row["moon_radius"] = f"{frame.moon_radius:.3f}"
             row["moon_fit_error"] = f"{frame.moon_fit_error:.4f}"
+            row["brightness"] = f"{frame.brightness:.3f}"
             row["sharpness"] = f"{frame.sharpness:.4f}"
             writer.writerow(row)
 
@@ -316,3 +321,90 @@ def _circle_from_three_points(points: np.ndarray) -> tuple[float, float, float] 
     ) / divisor
     radius = float(np.hypot(x1 - center_x, y1 - center_y))
     return float(center_x), float(center_y), radius
+
+
+def _fit_eclipse_model(frames: list[FrameAnalysis]) -> EclipseModel:
+    """Fit a stable lunar trajectory using geometrically well-conditioned frames."""
+    reference_time = frames[0].captured_at
+    candidates: list[FrameAnalysis] = []
+    for frame in frames:
+        if frame.blurry:
+            continue
+        separation = float(
+            np.hypot(
+                frame.moon_center_x - frame.center_x,
+                frame.moon_center_y - frame.center_y,
+            )
+        )
+        predicted_area = _visible_circle_area(
+            frame.radius,
+            frame.moon_radius,
+            separation,
+        )
+        area_ratio = predicted_area / frame.bright_pixels
+        if 0.75 <= area_ratio <= 1.30:
+            candidates.append(frame)
+    if len(candidates) < 4:
+        candidates = [frame for frame in frames if not frame.blurry]
+    if len(candidates) < 4:
+        raise AnalysisError("Too few sharp frames to fit a stable eclipse trajectory")
+
+    elapsed = np.asarray(
+        [(frame.captured_at - reference_time).total_seconds() for frame in candidates],
+        dtype=np.float64,
+    )
+    moon_x = np.asarray(
+        [frame.moon_center_x - frame.center_x for frame in candidates],
+        dtype=np.float64,
+    )
+    moon_y = np.asarray(
+        [frame.moon_center_y - frame.center_y for frame in candidates],
+        dtype=np.float64,
+    )
+    x_velocity, x_intercept = np.polyfit(elapsed, moon_x, 1)
+    y_velocity, y_intercept = np.polyfit(elapsed, moon_y, 1)
+    return EclipseModel(
+        reference_time=reference_time,
+        solar_radius=float(np.median([frame.radius for frame in frames if not frame.blurry])),
+        moon_radius=float(np.median([frame.moon_radius for frame in candidates])),
+        moon_x_intercept=float(x_intercept),
+        moon_x_velocity=float(x_velocity),
+        moon_y_intercept=float(y_intercept),
+        moon_y_velocity=float(y_velocity),
+        supporting_frames=len(candidates),
+    )
+
+
+def _visible_circle_area(solar_radius: float, moon_radius: float, separation: float) -> float:
+    """Area of the solar disc not covered by the lunar disc."""
+    if separation >= solar_radius + moon_radius:
+        return math.pi * solar_radius**2
+    if separation <= abs(solar_radius - moon_radius):
+        if moon_radius >= solar_radius:
+            return 0.0
+        return math.pi * (solar_radius**2 - moon_radius**2)
+    solar_angle = math.acos(
+        np.clip(
+            (separation**2 + solar_radius**2 - moon_radius**2) / (2.0 * separation * solar_radius),
+            -1.0,
+            1.0,
+        )
+    )
+    moon_angle = math.acos(
+        np.clip(
+            (separation**2 + moon_radius**2 - solar_radius**2) / (2.0 * separation * moon_radius),
+            -1.0,
+            1.0,
+        )
+    )
+    triangle = 0.5 * math.sqrt(
+        max(
+            0.0,
+            (-separation + solar_radius + moon_radius)
+            * (separation + solar_radius - moon_radius)
+            * (separation - solar_radius + moon_radius)
+            * (separation + solar_radius + moon_radius),
+        )
+    )
+    overlap = solar_radius**2 * solar_angle + moon_radius**2 * moon_angle - triangle
+    return math.pi * solar_radius**2 - overlap

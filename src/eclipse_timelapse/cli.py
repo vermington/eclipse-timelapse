@@ -65,8 +65,8 @@ def _add_render_overrides(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--interpolation",
-        choices=("morph", "geometry", "crossfade"),
-        help="transition strategy; morph avoids doubled lunar edges",
+        choices=("physical", "morph", "geometry", "crossfade"),
+        help="transition strategy; physical preserves centring and clean edges",
     )
     parser.add_argument("--output", type=str, help="output MP4 path, relative to the project")
     blur_group = parser.add_mutually_exclusive_group()

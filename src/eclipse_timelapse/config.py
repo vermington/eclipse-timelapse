@@ -34,8 +34,8 @@ class RenderConfig:
     crop_size: int = 2400
     duration_seconds: float = 15.0
     frames_per_second: int = 30
-    timeline: str = "logarithmic"
-    interpolation: str = "morph"
+    timeline: str = "linear"
+    interpolation: str = "physical"
     maximum_gap_seconds: float = 30.0
     minimum_gap_seconds: float = 1.0
     exclude_blurry: bool = True
@@ -113,8 +113,10 @@ class ProjectConfig:
             raise ConfigurationError(
                 "render.timeline must be uniform, linear, logarithmic, or capped"
             )
-        if render.interpolation not in {"morph", "geometry", "crossfade"}:
-            raise ConfigurationError("render.interpolation must be morph, geometry, or crossfade")
+        if render.interpolation not in {"physical", "morph", "geometry", "crossfade"}:
+            raise ConfigurationError(
+                "render.interpolation must be physical, morph, geometry, or crossfade"
+            )
         if render.maximum_gap_seconds <= 0 or render.minimum_gap_seconds <= 0:
             raise ConfigurationError("render gap settings must be positive")
         if not 0 <= render.crf <= 51:

@@ -14,7 +14,8 @@ def test_repository_configuration_is_valid() -> None:
     config = ProjectConfig.load(Path("eclipse.toml"))
 
     assert config.render.resolution == 1080
-    assert config.render.interpolation == "morph"
+    assert config.render.timeline == "linear"
+    assert config.render.interpolation == "physical"
     assert config.render.exclude_blurry is True
 
 

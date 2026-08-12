@@ -20,10 +20,11 @@ photographs are 10 seconds apart, the generated eclipse is exactly 25% of the
 way between them after 2.5 seconds, 50% after 5 seconds, and 75% after 7.5
 seconds.
 
-The default physical renderer holds the Sun fixed and moves a fitted lunar disc
-at constant measured velocity. A clean texture atlas assembled only from the
-aligned source photographs prevents photographed lunar edges from leaking into
-intermediate frames. Source brightness is retained, while colour is normalized
+With source anchors disabled, the physical renderer holds the Sun fixed and
+moves a fitted lunar disc at constant measured velocity. A clean texture atlas
+assembled only from the aligned source photographs prevents photographed lunar
+edges from leaking into intermediate frames. Source brightness is retained,
+while colour is normalized
 before reconstruction so different in-camera processing does not create seams
 within the solar crescent. Compact solar features are tracked across reliable
 observations and rendered as a moving detail layer; when no sufficiently long,
@@ -35,9 +36,13 @@ The project configuration also enables source anchors. Each original is given
 its own ordered output frame as close as possible to its ideal clock-linear
 position. At that frame, the renderer emits only the aligned 4:5 crop of that
 photograph—no texture atlas, synthetic lunar geometry, mask, local retouching,
-or blend. A smooth residual interpolation joins the physical reconstruction to
-the neighbouring source anchors. The JSON report records every assignment,
-timing offset, blur flag, and SHA-256 digest of the pre-encode aligned pixels.
+or blend. Between anchors, a single smoothly morphed eclipse silhouette reveals
+pixels from the endpoint photograph with more visible solar area, using the
+other endpoint only where it provides pixels farther from an occulting edge.
+There is no texture atlas, colour normalization, detail averaging, invented
+sunspot motion, or source-image residual blending in this mode. The JSON report
+records every assignment, timing offset, blur flag, and SHA-256 digest of the
+pre-encode aligned pixels.
 
 ## Requirements
 
@@ -159,9 +164,8 @@ uv run eclipse-timelapse render --include-blurry
 
 The threshold is applied during `analyze` or `run`. The render policy never
 deletes a photograph. With source anchors enabled, blur-flagged photographs
-still appear on their assigned anchor frames but are excluded from texture
-reconstruction. With source anchors disabled, the flag controls whether they
-participate in the video at all.
+still appear and participate as authentic source texture. With source anchors
+disabled, the flag controls whether they participate in the video at all.
 
 ## Default workflow
 
@@ -179,7 +183,7 @@ participate in the video at all.
 10. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.
 
 The original files are never edited. Blur-flagged photographs remain in the
-default source-anchored render but do not influence its reconstructed texture.
+default source-anchored render.
 
 ## Outputs
 

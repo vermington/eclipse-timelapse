@@ -112,9 +112,23 @@ def test_physical_atlas_normalizes_source_colour_seams(tmp_path) -> None:
         total_frames=6,
         frames_per_second=render.frames_per_second,
     )
-    interpolator = _SourceAnchorInterpolator(cache, positions, anchors, total_frames=6)
+    interpolator = _SourceAnchorInterpolator(cache, anchors)
     assert np.array_equal(interpolator.render(0), cache.get(0))
     assert np.array_equal(interpolator.render(5), cache.get(1))
+    intermediate = interpolator.render(2)
+    fraction = 2 / 5
+    smooth_fraction = fraction * fraction * (3.0 - 2.0 * fraction)
+    target_distance = (
+        cache.signed_distance(0) * (1.0 - smooth_fraction)
+        + cache.signed_distance(1) * smooth_fraction
+    )
+    full_coverage = (target_distance >= 1.0) & (cache.solar_mask >= 1.0)
+    authentic_pixel = np.all(intermediate == cache.get(0), axis=2) | np.all(
+        intermediate == cache.get(1),
+        axis=2,
+    )
+    assert np.any(full_coverage)
+    assert np.all(authentic_pixel[full_coverage])
     anchor_report = interpolator.anchor_report()
     assert anchor_report["pre_encode_pixel_identity"] is True
     assert anchor_report["encoded_pixel_identity"] is False
@@ -242,11 +256,14 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
     output = render_project(config, report)
 
     render_report = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
-    assert render_report["solar_detail_motion"]["supporting_frames"] == 0
+    assert "solar_detail_motion" not in render_report
     assert render_report["source_anchors"]["anchor_count"] == 2
     assert render_report["source_anchors"]["all_source_frames_anchored"] is True
+    assert render_report["source_anchors"]["intermediate_texture_policy"] == (
+        "maximum-coverage-source-pixels-with-safe-occlusion-fallback"
+    )
     assert render_report["excluded_blurry_frames"] == []
-    assert render_report["excluded_blurry_from_reconstruction"] == ["frame-2.jpg"]
+    assert render_report["excluded_blurry_from_reconstruction"] == []
 
     capture = cv2.VideoCapture(str(output))
     decoded_frames = []

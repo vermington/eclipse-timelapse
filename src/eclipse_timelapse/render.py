@@ -189,14 +189,10 @@ class _AlignedFrameCache:
         skip_blurry: bool = False,
     ) -> np.ndarray:
         """Build a colour-consistent texture whose reliable detail moves over time."""
-        self.solar_mask = _disc_coverage(
-            self.grid_x,
-            self.grid_y,
-            self.output_width / 2.0,
-            self.output_height / 2.0,
-            solar_radius * self.scale,
-        )
+        self.prepare_solar_mask(solar_radius)
+        assert self.solar_mask is not None
         solar_pixels = self.solar_mask > 0.0
+
         detail_blur_sigma = max(2.0, solar_radius * self.scale * 0.04)
         detail_edge_margin = max(2.0, solar_radius * self.scale * 0.04)
         reference_time = self.frames[0].captured_at
@@ -310,6 +306,17 @@ class _AlignedFrameCache:
         self.atlas_brightness = max(float(np.median(atlas_luminance[solar_pixels])), 1.0)
         self.atlas = atlas
         return atlas
+
+    def prepare_solar_mask(self, solar_radius: float) -> np.ndarray:
+        """Prepare only the aligned solar-disc mask without reconstructing texture."""
+        self.solar_mask = _disc_coverage(
+            self.grid_x,
+            self.grid_y,
+            self.output_width / 2.0,
+            self.output_height / 2.0,
+            solar_radius * self.scale,
+        )
+        return self.solar_mask
 
 
 def _extract_solar_detail(
@@ -586,19 +593,14 @@ class _SourceAnchorInterpolator:
     def __init__(
         self,
         cache: _AlignedFrameCache,
-        positions: np.ndarray,
         anchors: tuple[_SourceAnchor, ...],
-        total_frames: int,
     ) -> None:
         self.cache = cache
-        self.positions = positions
         self.anchors = anchors
-        self.total_frames = total_frames
         self.output_frames = np.asarray(
             [anchor.output_frame for anchor in anchors],
             dtype=np.int32,
         )
-        self.residual_cache: OrderedDict[int, np.ndarray] = OrderedDict()
 
     def render(self, output_frame: int) -> np.ndarray:
         """Render one frame, returning the aligned source unchanged at every anchor."""
@@ -616,15 +618,6 @@ class _SourceAnchorInterpolator:
         fraction = (output_frame - left_anchor.output_frame) / interval
         smooth_fraction = fraction * fraction * (3.0 - 2.0 * fraction)
 
-        texture = self._physical_texture(output_frame)
-        left_residual = self._anchor_interior_residual(left_index)
-        right_residual = self._anchor_interior_residual(right_index)
-        corrected = (
-            texture
-            + left_residual * (1.0 - smooth_fraction)
-            + right_residual * smooth_fraction
-        )
-
         left_distance = self.cache.signed_distance(left_anchor.source_index)
         right_distance = self.cache.signed_distance(right_anchor.source_index)
         target_distance = (
@@ -633,8 +626,33 @@ class _SourceAnchorInterpolator:
         target_mask = np.clip((target_distance + 1.0) / 2.0, 0.0, 1.0)
         assert self.cache.solar_mask is not None
         target_mask *= self.cache.solar_mask
-        corrected *= target_mask[:, :, None]
-        return np.uint8(np.clip(np.rint(corrected), 0.0, 255.0))
+        left_frame = self.cache.frames[left_anchor.source_index]
+        right_frame = self.cache.frames[right_anchor.source_index]
+        left_image = self.cache.get(left_anchor.source_index)
+        right_image = self.cache.get(right_anchor.source_index)
+        safe_margin = max(1.5, self.cache.render.resolution * 0.002)
+        left_safe = left_distance > safe_margin
+        right_safe = right_distance > safe_margin
+        prefer_left = left_frame.bright_pixels > right_frame.bright_pixels or (
+            left_frame.bright_pixels == right_frame.bright_pixels and fraction < 0.5
+        )
+        if prefer_left:
+            texture = left_image.copy()
+            texture[~left_safe & right_safe] = right_image[~left_safe & right_safe]
+        else:
+            texture = right_image.copy()
+            texture[~right_safe & left_safe] = left_image[~right_safe & left_safe]
+        neither_safe = ~left_safe & ~right_safe
+        prefer_left_pixel = left_distance >= right_distance
+        texture[neither_safe & prefer_left_pixel] = left_image[
+            neither_safe & prefer_left_pixel
+        ]
+        texture[neither_safe & ~prefer_left_pixel] = right_image[
+            neither_safe & ~prefer_left_pixel
+        ]
+        texture = texture.astype(np.float32)
+        texture *= target_mask[:, :, None]
+        return np.uint8(np.clip(np.rint(texture), 0.0, 255.0))
 
     def anchor_report(self) -> dict[str, object]:
         """Return an auditable record of source placement and pre-encode identity."""
@@ -662,6 +680,9 @@ class _SourceAnchorInterpolator:
         )
         return {
             "policy": "aligned-source-pass-through",
+            "intermediate_texture_policy": (
+                "maximum-coverage-source-pixels-with-safe-occlusion-fallback"
+            ),
             "pre_encode_pixel_identity": True,
             "encoded_pixel_identity": self.cache.render.codec == "ffv1",
             "geometric_operations": [
@@ -680,36 +701,6 @@ class _SourceAnchorInterpolator:
             ),
             "frames": records,
         }
-
-    def _physical_texture(self, output_frame: int) -> np.ndarray:
-        progress = output_frame / (self.total_frames - 1)
-        left, right, alpha = frame_blend(self.positions, progress)
-        return _physical_texture(
-            self.cache.frames[left],
-            self.cache.frames[right],
-            alpha,
-            self.cache,
-        )
-
-    def _anchor_interior_residual(self, anchor_index: int) -> np.ndarray:
-        if anchor_index in self.residual_cache:
-            self.residual_cache.move_to_end(anchor_index)
-            return self.residual_cache[anchor_index]
-        anchor = self.anchors[anchor_index]
-        source = self.cache.get(anchor.source_index)
-        texture = self._physical_texture(anchor.output_frame)
-        edge_margin = max(2.0, self.cache.render.resolution * 0.006)
-        interior_weight = np.clip(
-            (self.cache.signed_distance(anchor.source_index) - edge_margin) / edge_margin,
-            0.0,
-            1.0,
-        )
-        residual = (source.astype(np.float32) - texture) * interior_weight[:, :, None]
-        self.residual_cache[anchor_index] = residual
-        if len(self.residual_cache) > 4:
-            self.residual_cache.popitem(last=False)
-        return residual
-
 
 def render_project(
     config: ProjectConfig,
@@ -734,9 +725,7 @@ def _render_project_unlocked(
     if render.source_anchors:
         included = report.frames
         excluded: tuple[FrameAnalysis, ...] = ()
-        reconstruction_excluded = tuple(
-            frame for frame in report.frames if render.exclude_blurry and frame.blurry
-        )
+        reconstruction_excluded: tuple[FrameAnalysis, ...] = ()
     else:
         included = tuple(
             frame for frame in report.frames if not (render.exclude_blurry and frame.blurry)
@@ -755,11 +744,12 @@ def _render_project_unlocked(
     output_file = config.output_file
     temporary_file = output_file.with_name(f".{output_file.stem}.partial{output_file.suffix}")
     cache = _AlignedFrameCache(config.input_directory, included, render)
-    if render.interpolation == "physical":
+    if render.source_anchors:
+        cache.prepare_solar_mask(report.eclipse_model.solar_radius)
+    elif render.interpolation == "physical":
         cache.prepare_physical_atlas(
             report.eclipse_model.solar_radius,
             progress,
-            skip_blurry=render.source_anchors and render.exclude_blurry,
         )
     elif render.interpolation == "morph":
         cache.build_atlas(progress)
@@ -777,9 +767,7 @@ def _render_project_unlocked(
     anchor_interpolator = (
         _SourceAnchorInterpolator(
             cache,
-            positions,
             anchors,
-            total_frames,
         )
         if anchors
         else None
@@ -924,7 +912,11 @@ def _render_project_unlocked(
             cv2.cvtColor(poster, cv2.COLOR_RGB2BGR),
             [cv2.IMWRITE_JPEG_QUALITY, 95],
         )
-    detail_motion = cache.detail_motion if render.interpolation == "physical" else None
+    detail_motion = (
+        cache.detail_motion
+        if render.interpolation == "physical" and not render.source_anchors
+        else None
+    )
     anchor_report = anchor_interpolator.anchor_report() if anchor_interpolator else None
     _write_render_report(
         output_file,

@@ -17,7 +17,7 @@ from eclipse_timelapse.render import (
     _fit_detail_motion,
     _physical_frame,
     _schedule_source_anchors,
-    _SourceOnlyTimeline,
+    _SourceAnchoredTimeline,
     align_frame,
     render_project,
 )
@@ -112,7 +112,7 @@ def test_physical_atlas_normalizes_source_colour_seams(tmp_path) -> None:
         total_frames=6,
         frames_per_second=render.frames_per_second,
     )
-    timeline = _SourceOnlyTimeline(cache, anchors)
+    timeline = _SourceAnchoredTimeline(cache, anchors, total_frames=6)
     assert np.array_equal(timeline.render(0), cache.get(0))
     assert np.array_equal(timeline.render(5), cache.get(1))
     assert np.array_equal(timeline.render(2), cache.get(0))
@@ -123,6 +123,74 @@ def test_physical_atlas_normalizes_source_colour_seams(tmp_path) -> None:
     assert anchor_report["synthetic_frame_count"] == 0
     assert anchor_report["encoded_pixel_identity"] is False
     assert anchor_report["anchor_count"] == 2
+
+
+def test_sparse_ingress_infill_only_blacks_gap_start_pixels(tmp_path) -> None:
+    source_size = 128
+    frames = []
+    for index, moon_x in enumerate((86.0, 54.0)):
+        image = np.zeros((source_size, source_size, 3), dtype=np.uint8)
+        cv2.circle(image, (64, 64), 30, (90, 120, 180), thickness=-1)
+        cv2.circle(image, (round(moon_x), 64), 31, (0, 0, 0), thickness=-1)
+        filename = f"ingress-{index}.png"
+        cv2.imwrite(str(tmp_path / filename), image)
+        frames.append(
+            FrameAnalysis(
+                sequence=index + 1,
+                filename=filename,
+                captured_at=datetime(2026, 8, 12) + timedelta(seconds=index * 10),
+                width=source_size,
+                height=source_size,
+                center_x=64.0,
+                center_y=64.0,
+                radius=30.0,
+                moon_center_x=moon_x,
+                moon_center_y=64.0,
+                moon_radius=31.0,
+                moon_fit_error=0.1,
+                bright_pixels=2_000,
+                brightness=120.0,
+                sharpness=2.0,
+                blurry=False,
+            )
+        )
+
+    render = RenderConfig(
+        resolution=64,
+        aspect_ratio="1:1",
+        crop_size=128,
+        duration_seconds=3.1,
+        frames_per_second=10,
+        ingress_infill_cutoff_seconds=2.0,
+        ingress_infill_minimum_gap_seconds=0.5,
+        ingress_infill_interval_seconds=0.5,
+    )
+    cache = _AlignedFrameCache(tmp_path, tuple(frames), render)
+    anchors = _schedule_source_anchors(
+        np.asarray([0.0, 1.0]),
+        total_frames=31,
+        frames_per_second=render.frames_per_second,
+    )
+    timeline = _SourceAnchoredTimeline(cache, anchors, total_frames=31)
+
+    base = cache.get(0)
+    first_infill = timeline.render(5)
+    second_infill = timeline.render(10)
+    unchanged = np.all(first_infill == base, axis=2)
+    black = np.all(first_infill == 0, axis=2)
+    assert np.all(unchanged | black)
+    assert np.any(~unchanged)
+    assert np.all(np.all(first_infill == 0, axis=2) <= np.all(second_infill == 0, axis=2))
+    assert np.array_equal(timeline.render(0), base)
+    assert np.array_equal(timeline.render(20), cache.get(1))
+    assert np.array_equal(timeline.render(30), cache.get(1))
+
+    report = timeline.anchor_report()
+    assert report["synthetic_distinct_frame_count"] == 3
+    assert report["synthetic_output_frame_count"] == 15
+    assert report["post_cutoff_synthetic_frame_count"] == 0
+    assert report["all_synthetic_frames_derived_from_gap_start"] is True
+    assert report["all_synthetic_pixel_changes_are_blackening_only"] is True
 
 
 def test_source_anchor_schedule_is_unique_ordered_and_pins_endpoints() -> None:

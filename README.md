@@ -5,21 +5,22 @@ into an aligned, timestamp-aware timelapse in square, portrait, or landscape
 formats.
 
 It detects the solar and lunar limbs, centres every exposure, and reports soft
-frames. The default source-anchored renderer uses only complete aligned
-photographs; optional synthetic modes can reconstruct a solar texture and use a
+frames. The default source-anchored renderer preserves every complete aligned
+photograph and adds only a few audited, subtractive ingress states in long early
+gaps. Optional synthetic modes can reconstruct a solar texture and use a
 globally fitted physical model. H.264 delivery and lossless FFV1 archival
-outputs are both supported. Output resolution, crop, duration, frame rate,
-quality, timing, and interpolation are configurable.
+outputs are both supported.
 
 ## Why this exists
 
 An ordinary image sequence assigns every photograph the same duration. That
 distorts an irregularly photographed event. The default clock-linear timeline
 instead places every photograph at its real normalized capture time. In the
-source-only default, if two photographs are 10 seconds apart, the first is held
-until their 5-second midpoint and the second is then held. With source anchors
-disabled, an interpolated mode is 25% of the way between them after 2.5 seconds,
-50% after 5 seconds, and 75% after 7.5 seconds.
+source-anchored timeline, every original remains on its exact assigned frame.
+Ordinary gaps switch to the nearest source at their midpoint. Eligible ingress
+gaps receive sparse boundary states at their clock-linear positions. With
+source anchors disabled, an interpolated mode is 25% of the way through a
+10-second gap after 2.5 seconds, 50% after 5 seconds, and 75% after 7.5 seconds.
 
 With source anchors disabled, the physical renderer holds the Sun fixed and
 moves a fitted lunar disc at constant measured velocity. A clean texture atlas
@@ -33,16 +34,21 @@ consistent track exists, detail remains neutral rather than acquiring invented
 motion. Optional compressed timelines remain available when a long real-world
 gap would otherwise occupy more of the finished film than desired.
 
-The project configuration also enables source anchors. Each original is given
+The project configuration enables source anchors. Each original is given
 its own ordered output frame as close as possible to its ideal clock-linear
 position. At that frame, the renderer emits only the aligned 4:5 crop of that
 photograph—no texture atlas, synthetic lunar geometry, mask, local retouching,
-or blend. Between anchors, the nearest complete photograph is held unchanged
-until the following photograph becomes nearer in clock-linear time. There is no
-interpolated lunar boundary, crossfade, per-pixel mixing, texture atlas, colour
-normalization, detail averaging, or invented sunspot motion in this mode. The
-JSON report records every assignment, timing offset, blur flag, and SHA-256
-digest of the pre-encode aligned pixels.
+or blend.
+
+Before the configured 19-second cutoff, gaps of at least 0.75 seconds receive a
+new boundary state every 0.75 seconds. Each state starts again from the gap's
+first photograph and changes pixels in exactly one permitted way: newly covered
+solar pixels are set to RGB black. It never borrows endpoint texture, blends
+colour, moves detail, changes a surviving solar pixel, or reveals a pixel that
+was previously removed within the gap. The defaults add 18 distinct states
+across six gaps. At and after 19 seconds there is no generated infill; the
+nearest complete photograph is held. The JSON report records every source
+assignment, infill state, timing offset, blur flag, and source SHA-256 digest.
 
 ## Requirements
 
@@ -113,6 +119,8 @@ uv run eclipse-timelapse render --timeline capped
 uv run eclipse-timelapse render --interpolation crossfade --no-source-anchors
 uv run eclipse-timelapse render --source-anchors
 uv run eclipse-timelapse render --no-source-anchors
+uv run eclipse-timelapse render --ingress-infill --infill-interval 0.75
+uv run eclipse-timelapse render --no-ingress-infill
 uv run eclipse-timelapse render --include-blurry
 uv run eclipse-timelapse render --exclude-blurry
 ```
@@ -124,7 +132,7 @@ Every timeline mode uses a linear fraction within each pair of photographs; the
 mode changes only how much of the finished clip is allocated to each capture
 gap.
 
-## Source-faithful master and Instagram copy
+## Auditable master and Instagram copy
 
 The tracked defaults produce a 26.25-second, 60 FPS, 1080×1350 H.264 MP4. That
 1,575-frame grid gives all 92 photographs a distinct ordered frame; the render
@@ -145,10 +153,10 @@ uv run eclipse-timelapse render \
   --output output/eclipse_timelapse_source_anchored_master_4x5.mkv
 ```
 
-FFV1 preserves the rendered RGB anchor pixels exactly. H.264 and Instagram both
-re-encode pixels, and Instagram may also convert 60 FPS video to 30 FPS; the
-lossless master and its JSON audit report are therefore the authoritative
-source-faithful artifacts.
+FFV1 preserves every rendered RGB pixel exactly, including the exact source
+anchors and the sparse subtractive states. H.264 and Instagram both re-encode
+pixels, and Instagram may also convert 60 FPS video to 30 FPS; the lossless
+master and its JSON audit report are therefore the authoritative artifacts.
 
 ## Blur controls
 
@@ -176,9 +184,11 @@ disabled, the flag controls whether they participate in the video at all.
 5. Align the solar centre with a single affine resampling operation.
 6. Assign every photograph a unique, minimum-error frame near its ideal
    clock-linear position.
-7. Fill the timeline by holding the nearest complete aligned photograph, with
-   no crossfade, mask interpolation, colour normalization, or pixel mixing.
-8. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.
+7. Add sparse ingress-only states to qualifying pre-cutoff gaps by setting only
+   newly occulted pixels in each gap's starting photograph to black.
+8. Hold the nearest complete aligned photograph everywhere else, including all
+   frames at and after the cutoff.
+9. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.
 
 The original files are never edited. Blur-flagged photographs remain in the
 default source-anchored render.

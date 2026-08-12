@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 from collections import OrderedDict, defaultdict
@@ -59,6 +60,24 @@ class _SourceAnchor:
     ideal_frame: float
     output_frame: int
     timing_offset_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _IngressInfillState:
+    """One sparse subtractive boundary state inside a source gap."""
+
+    output_frame: int
+    gap_fraction: float
+
+
+@dataclass(frozen=True, slots=True)
+class _IngressInfillGap:
+    """A source interval eligible for sparse ingress-only infill."""
+
+    left_anchor: _SourceAnchor
+    right_anchor: _SourceAnchor
+    states: tuple[_IngressInfillState, ...]
+    active_end_frame: int
 
 
 def align_frame(
@@ -587,35 +606,146 @@ def _schedule_source_anchors(
     )
 
 
-class _SourceOnlyTimeline:
-    """Render a clock-linear sequence using only complete source photographs."""
+def _schedule_ingress_infill(
+    anchors: tuple[_SourceAnchor, ...],
+    *,
+    total_frames: int,
+    render: RenderConfig,
+) -> tuple[_IngressInfillGap, ...]:
+    """Schedule a small number of subtractive states before the configured cutoff."""
+    if not render.ingress_infill:
+        return ()
+
+    frames_per_second = render.frames_per_second
+    interval_frames = max(1, round(render.ingress_infill_interval_seconds * frames_per_second))
+    cutoff_frame = min(
+        total_frames,
+        math.ceil(render.ingress_infill_cutoff_seconds * frames_per_second - 1e-9),
+    )
+    gaps = []
+    for left_anchor, right_anchor in zip(anchors, anchors[1:], strict=False):
+        gap_frames = right_anchor.output_frame - left_anchor.output_frame
+        gap_seconds = gap_frames / frames_per_second
+        if gap_seconds < render.ingress_infill_minimum_gap_seconds:
+            continue
+        active_end_frame = min(right_anchor.output_frame, cutoff_frame)
+        state_frames = range(
+            left_anchor.output_frame + interval_frames,
+            active_end_frame,
+            interval_frames,
+        )
+        states = tuple(
+            _IngressInfillState(
+                output_frame=output_frame,
+                gap_fraction=(output_frame - left_anchor.output_frame) / gap_frames,
+            )
+            for output_frame in state_frames
+        )
+        if states:
+            gaps.append(
+                _IngressInfillGap(
+                    left_anchor=left_anchor,
+                    right_anchor=right_anchor,
+                    states=states,
+                    active_end_frame=active_end_frame,
+                )
+            )
+    return tuple(gaps)
+
+
+class _SourceAnchoredTimeline:
+    """Render exact anchors with optional sparse, subtractive ingress infill."""
 
     def __init__(
         self,
         cache: _AlignedFrameCache,
         anchors: tuple[_SourceAnchor, ...],
+        *,
+        total_frames: int,
     ) -> None:
         self.cache = cache
         self.anchors = anchors
+        self.total_frames = total_frames
         self.output_frames = np.asarray(
             [anchor.output_frame for anchor in anchors],
             dtype=np.int32,
         )
+        self.infill_gaps = _schedule_ingress_infill(
+            anchors,
+            total_frames=total_frames,
+            render=cache.render,
+        )
+        self.infill_by_left_frame = {
+            gap.left_anchor.output_frame: gap for gap in self.infill_gaps
+        }
+        self.infill_cache: OrderedDict[tuple[int, int], np.ndarray] = OrderedDict()
 
     def render(self, output_frame: int) -> np.ndarray:
-        """Return the complete aligned photograph nearest this output frame."""
+        """Return an exact source or a start-source image with added black occlusion."""
         insertion = int(np.searchsorted(self.output_frames, output_frame, side="left"))
         if insertion == 0:
-            source_index = 0
-        elif insertion == len(self.anchors):
-            source_index = len(self.anchors) - 1
-        else:
-            left = self.anchors[insertion - 1]
-            right = self.anchors[insertion]
-            left_distance = output_frame - left.output_frame
-            right_distance = right.output_frame - output_frame
-            source_index = insertion - 1 if left_distance <= right_distance else insertion
-        return self.cache.get(self.anchors[source_index].source_index).copy()
+            return self.cache.get(self.anchors[0].source_index).copy()
+        if insertion == len(self.anchors):
+            return self.cache.get(self.anchors[-1].source_index).copy()
+
+        right = self.anchors[insertion]
+        if right.output_frame == output_frame:
+            return self.cache.get(right.source_index).copy()
+        left = self.anchors[insertion - 1]
+        infill_gap = self.infill_by_left_frame.get(left.output_frame)
+        if infill_gap is not None and output_frame < infill_gap.active_end_frame:
+            state_frames = [state.output_frame for state in infill_gap.states]
+            state_index = int(np.searchsorted(state_frames, output_frame, side="right")) - 1
+            if state_index >= 0:
+                return self._render_infill_state(infill_gap, state_index).copy()
+            return self.cache.get(left.source_index).copy()
+
+        left_distance = output_frame - left.output_frame
+        right_distance = right.output_frame - output_frame
+        nearest = left if left_distance <= right_distance else right
+        return self.cache.get(nearest.source_index).copy()
+
+    def _render_infill_state(
+        self,
+        gap: _IngressInfillGap,
+        state_index: int,
+    ) -> np.ndarray:
+        """Blacken only the cumulative lunar advance in the gap's starting image."""
+        state = gap.states[state_index]
+        key = (gap.left_anchor.source_index, state.output_frame)
+        if key in self.infill_cache:
+            self.infill_cache.move_to_end(key)
+            return self.infill_cache[key]
+
+        left_frame = self.cache.frames[gap.left_anchor.source_index]
+        right_frame = self.cache.frames[gap.right_anchor.source_index]
+        left_x, left_y, left_radius = _aligned_moon_geometry(left_frame, self.cache.render)
+        right_x, right_y, right_radius = _aligned_moon_geometry(right_frame, self.cache.render)
+        solar_pixels = _disc_pixels(
+            self.cache.grid_x,
+            self.cache.grid_y,
+            self.cache.output_width / 2.0,
+            self.cache.output_height / 2.0,
+            left_frame.radius * self.cache.scale,
+        )
+        new_occlusion = np.zeros(solar_pixels.shape, dtype=bool)
+        for scheduled_state in gap.states[: state_index + 1]:
+            fraction = scheduled_state.gap_fraction
+            target_disc = _disc_pixels(
+                self.cache.grid_x,
+                self.cache.grid_y,
+                left_x + (right_x - left_x) * fraction,
+                left_y + (right_y - left_y) * fraction,
+                left_radius + (right_radius - left_radius) * fraction,
+            )
+            new_occlusion |= target_disc & solar_pixels
+
+        image = self.cache.get(gap.left_anchor.source_index).copy()
+        image[new_occlusion] = 0
+        self.infill_cache[key] = image
+        if len(self.infill_cache) > 2:
+            self.infill_cache.popitem(last=False)
+        return image
 
     def anchor_report(self) -> dict[str, object]:
         """Return an auditable record of source placement and pre-encode identity."""
@@ -641,11 +771,59 @@ class _SourceOnlyTimeline:
             [anchor.timing_offset_seconds for anchor in self.anchors],
             dtype=np.float64,
         )
+        infill_records = []
+        for gap in self.infill_gaps:
+            left_frame = self.cache.frames[gap.left_anchor.source_index]
+            right_frame = self.cache.frames[gap.right_anchor.source_index]
+            infill_records.append(
+                {
+                    "start_filename": left_frame.filename,
+                    "end_filename": right_frame.filename,
+                    "start_output_frame": gap.left_anchor.output_frame,
+                    "end_output_frame": gap.right_anchor.output_frame,
+                    "gap_duration_seconds": (
+                        gap.right_anchor.output_frame - gap.left_anchor.output_frame
+                    )
+                    / self.cache.render.frames_per_second,
+                    "active_end_frame": gap.active_end_frame,
+                    "states": [
+                        {
+                            "output_frame": state.output_frame,
+                            "output_time_seconds": state.output_frame
+                            / self.cache.render.frames_per_second,
+                            "gap_fraction": state.gap_fraction,
+                        }
+                        for state in gap.states
+                    ],
+                }
+            )
+        distinct_infill_frames = sum(len(gap.states) for gap in self.infill_gaps)
+        synthetic_output_frames = sum(
+            gap.active_end_frame - gap.states[0].output_frame for gap in self.infill_gaps
+        )
+        has_infill = distinct_infill_frames > 0
         return {
-            "policy": "aligned-source-pass-through",
-            "intermediate_texture_policy": "nearest-complete-source-frame-hold",
-            "synthetic_frame_count": 0,
-            "pre_encode_all_frames_are_complete_sources": True,
+            "policy": (
+                "source-anchored-with-sparse-subtractive-ingress-infill"
+                if has_infill
+                else "aligned-source-pass-through"
+            ),
+            "intermediate_texture_policy": (
+                "gap-start-source-with-new-lunar-coverage-set-to-black"
+                if has_infill
+                else "nearest-complete-source-frame-hold"
+            ),
+            "synthetic_frame_count": distinct_infill_frames,
+            "synthetic_distinct_frame_count": distinct_infill_frames,
+            "synthetic_output_frame_count": synthetic_output_frames,
+            "source_output_frame_count": self.total_frames - synthetic_output_frames,
+            "pre_encode_all_frames_are_complete_sources": not has_infill,
+            "pre_encode_all_anchor_frames_are_complete_sources": True,
+            "pre_encode_all_surviving_pixels_match_gap_start_sources": True,
+            "all_synthetic_frames_derived_from_gap_start": True,
+            "all_synthetic_pixel_changes_are_blackening_only": True,
+            "post_cutoff_synthetic_frame_count": 0,
+            "ingress_infill_cutoff_seconds": self.cache.render.ingress_infill_cutoff_seconds,
             "pre_encode_pixel_identity": True,
             "encoded_pixel_identity": self.cache.render.codec == "ffv1",
             "geometric_operations": [
@@ -653,7 +831,15 @@ class _SourceOnlyTimeline:
                 f"{self.cache.render.aspect_ratio} crop",
                 "resize",
             ],
-            "photometric_operations": [],
+            "photometric_operations": (
+                ["set newly occulted pixels to RGB (0, 0, 0)"] if has_infill else []
+            ),
+            "infill_geometry": (
+                "linear interpolation of detected endpoint lunar circles"
+                if has_infill
+                else None
+            ),
+            "infill_gaps": infill_records,
             "anchor_count": len(self.anchors),
             "all_source_frames_anchored": len(self.anchors) == len(self.cache.frames),
             "maximum_absolute_timing_offset_milliseconds": float(
@@ -726,9 +912,10 @@ def _render_project_unlocked(
         else ()
     )
     source_timeline = (
-        _SourceOnlyTimeline(
+        _SourceAnchoredTimeline(
             cache,
             anchors,
+            total_frames=total_frames,
         )
         if anchors
         else None
@@ -1122,6 +1309,17 @@ def _disc_coverage(
     distance = np.hypot(grid_x - center_x, grid_y - center_y)
     # A two-pixel transition is a stable approximation of the source anti-aliasing.
     return np.clip((radius + 1.0 - distance) / 2.0, 0.0, 1.0)
+
+
+def _disc_pixels(
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    center_x: float,
+    center_y: float,
+    radius: float,
+) -> np.ndarray:
+    """Return whole pixels inside a disc without altering boundary pixel colours."""
+    return (grid_x - center_x) ** 2 + (grid_y - center_y) ** 2 <= radius**2
 
 
 def _write_render_report(

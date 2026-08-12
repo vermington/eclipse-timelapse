@@ -37,6 +37,10 @@ class RenderConfig:
     timeline: str = "linear"
     interpolation: str = "physical"
     source_anchors: bool = True
+    ingress_infill: bool = True
+    ingress_infill_cutoff_seconds: float = 19.0
+    ingress_infill_minimum_gap_seconds: float = 0.75
+    ingress_infill_interval_seconds: float = 0.75
     maximum_gap_seconds: float = 30.0
     minimum_gap_seconds: float = 1.0
     exclude_blurry: bool = True
@@ -123,6 +127,14 @@ class ProjectConfig:
             raise ConfigurationError(
                 "render.source_anchors requires render.interpolation = 'physical'"
             )
+        if render.ingress_infill_cutoff_seconds <= 0:
+            raise ConfigurationError("render.ingress_infill_cutoff_seconds must be positive")
+        if render.ingress_infill_minimum_gap_seconds <= 0:
+            raise ConfigurationError(
+                "render.ingress_infill_minimum_gap_seconds must be positive"
+            )
+        if render.ingress_infill_interval_seconds <= 0:
+            raise ConfigurationError("render.ingress_infill_interval_seconds must be positive")
         if render.maximum_gap_seconds <= 0 or render.minimum_gap_seconds <= 0:
             raise ConfigurationError("render gap settings must be positive")
         if render.codec not in {"h264", "ffv1"}:

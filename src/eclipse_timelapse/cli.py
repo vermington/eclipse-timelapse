@@ -85,6 +85,38 @@ def _add_render_overrides(parser: argparse.ArgumentParser) -> None:
         action="store_false",
         help="render every frame from the selected interpolation model",
     )
+    infill_group = parser.add_mutually_exclusive_group()
+    infill_group.add_argument(
+        "--ingress-infill",
+        dest="ingress_infill",
+        action="store_true",
+        default=None,
+        help="sparsely advance the lunar boundary using only each gap's starting photo",
+    )
+    infill_group.add_argument(
+        "--no-ingress-infill",
+        dest="ingress_infill",
+        action="store_false",
+        help="hold only complete source photographs between anchors",
+    )
+    parser.add_argument(
+        "--infill-cutoff",
+        dest="ingress_infill_cutoff_seconds",
+        type=float,
+        help="stop generating subtractive ingress frames at this output time",
+    )
+    parser.add_argument(
+        "--infill-min-gap",
+        dest="ingress_infill_minimum_gap_seconds",
+        type=float,
+        help="minimum output gap eligible for subtractive infill",
+    )
+    parser.add_argument(
+        "--infill-interval",
+        dest="ingress_infill_interval_seconds",
+        type=float,
+        help="time between distinct subtractive boundary states",
+    )
     parser.add_argument(
         "--codec",
         choices=("h264", "ffv1"),
@@ -123,6 +155,10 @@ def _with_overrides(config: ProjectConfig, arguments: argparse.Namespace) -> Pro
         ("timeline", "timeline"),
         ("interpolation", "interpolation"),
         ("source_anchors", "source_anchors"),
+        ("ingress_infill", "ingress_infill"),
+        ("ingress_infill_cutoff_seconds", "ingress_infill_cutoff_seconds"),
+        ("ingress_infill_minimum_gap_seconds", "ingress_infill_minimum_gap_seconds"),
+        ("ingress_infill_interval_seconds", "ingress_infill_interval_seconds"),
         ("codec", "codec"),
         ("output", "output"),
     ):

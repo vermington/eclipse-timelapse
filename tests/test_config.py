@@ -20,6 +20,10 @@ def test_repository_configuration_is_valid() -> None:
     assert config.render.timeline == "linear"
     assert config.render.interpolation == "physical"
     assert config.render.source_anchors is True
+    assert config.render.ingress_infill is True
+    assert config.render.ingress_infill_cutoff_seconds == 19.0
+    assert config.render.ingress_infill_minimum_gap_seconds == 0.75
+    assert config.render.ingress_infill_interval_seconds == 0.75
     assert config.render.exclude_blurry is True
 
 
@@ -64,4 +68,20 @@ def test_source_anchors_require_physical_interpolation(tmp_path) -> None:
     )
 
     with pytest.raises(ConfigurationError, match="requires"):
+        ProjectConfig.load(filename)
+
+
+@pytest.mark.parametrize(
+    "setting",
+    (
+        "ingress_infill_cutoff_seconds",
+        "ingress_infill_minimum_gap_seconds",
+        "ingress_infill_interval_seconds",
+    ),
+)
+def test_ingress_infill_timing_settings_must_be_positive(tmp_path, setting) -> None:
+    filename = tmp_path / "invalid.toml"
+    filename.write_text(f"[render]\n{setting} = 0\n", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=setting):
         ProjectConfig.load(filename)

@@ -15,8 +15,11 @@ def test_repository_configuration_is_valid() -> None:
 
     assert config.render.resolution == 1080
     assert output_dimensions(config.render) == (1080, 1350)
+    assert config.render.duration_seconds == 26.25
+    assert config.render.frames_per_second == 60
     assert config.render.timeline == "linear"
     assert config.render.interpolation == "physical"
+    assert config.render.source_anchors is True
     assert config.render.exclude_blurry is True
 
 
@@ -39,4 +42,26 @@ def test_invalid_aspect_ratio_is_rejected(tmp_path) -> None:
     filename.write_text('[render]\naspect_ratio = "portrait"\n', encoding="utf-8")
 
     with pytest.raises(ConfigurationError, match="positive integers"):
+        ProjectConfig.load(filename)
+
+
+def test_ffv1_requires_an_archival_container(tmp_path) -> None:
+    filename = tmp_path / "invalid.toml"
+    filename.write_text(
+        '[render]\ncodec = "ffv1"\noutput = "output/master.mp4"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="requires an .mkv or .avi"):
+        ProjectConfig.load(filename)
+
+
+def test_source_anchors_require_physical_interpolation(tmp_path) -> None:
+    filename = tmp_path / "invalid.toml"
+    filename.write_text(
+        '[render]\nsource_anchors = true\ninterpolation = "crossfade"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="requires"):
         ProjectConfig.load(filename)

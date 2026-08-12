@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import cv2
@@ -15,6 +16,9 @@ from eclipse_timelapse.render import (
     _exclusive_output_lock,
     _fit_detail_motion,
     _physical_frame,
+    _schedule_source_anchors,
+    _SourceAnchorInterpolator,
+    align_frame,
     render_project,
 )
 
@@ -102,6 +106,36 @@ def test_physical_atlas_normalizes_source_colour_seams(tmp_path) -> None:
     assert second_x - first_x == 5
     assert second_y == first_y
 
+    positions = np.asarray([0.0, 1.0])
+    anchors = _schedule_source_anchors(
+        positions,
+        total_frames=6,
+        frames_per_second=render.frames_per_second,
+    )
+    interpolator = _SourceAnchorInterpolator(cache, positions, anchors, total_frames=6)
+    assert np.array_equal(interpolator.render(0), cache.get(0))
+    assert np.array_equal(interpolator.render(5), cache.get(1))
+    anchor_report = interpolator.anchor_report()
+    assert anchor_report["pre_encode_pixel_identity"] is True
+    assert anchor_report["encoded_pixel_identity"] is False
+    assert anchor_report["anchor_count"] == 2
+
+
+def test_source_anchor_schedule_is_unique_ordered_and_pins_endpoints() -> None:
+    positions = np.asarray([0.0, 0.2, 0.2, 0.21, 1.0])
+
+    anchors = _schedule_source_anchors(
+        positions,
+        total_frames=10,
+        frames_per_second=60,
+    )
+
+    output_frames = [anchor.output_frame for anchor in anchors]
+    assert output_frames[0] == 0
+    assert output_frames[-1] == 9
+    assert output_frames == sorted(set(output_frames))
+    assert [anchor.source_index for anchor in anchors] == list(range(len(positions)))
+
 
 def test_detail_motion_follows_longest_confident_track() -> None:
     reference_time = datetime(2026, 8, 12, 18, 0, 0)
@@ -167,7 +201,7 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
                 bright_pixels=5_000,
                 brightness=140.0,
                 sharpness=2.0,
-                blurry=False,
+                blurry=index == 2,
             )
         )
 
@@ -209,6 +243,10 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
 
     render_report = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
     assert render_report["solar_detail_motion"]["supporting_frames"] == 0
+    assert render_report["source_anchors"]["anchor_count"] == 2
+    assert render_report["source_anchors"]["all_source_frames_anchored"] is True
+    assert render_report["excluded_blurry_frames"] == []
+    assert render_report["excluded_blurry_from_reconstruction"] == ["frame-2.jpg"]
 
     capture = cv2.VideoCapture(str(output))
     decoded_frames = []
@@ -220,16 +258,36 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
     capture.release()
     assert len(decoded_frames) == 4
 
-    grid_y, grid_x = np.mgrid[:80, :64]
-    solar_interior = np.hypot(grid_x - 32.0, grid_y - 40.0) <= 13.0
-    checked_frames = 0
-    for index, image in enumerate(decoded_frames):
-        progress = index / (len(decoded_frames) - 1)
-        moon_x = 32.0 + (27.0 - 30.0 * progress) / 4.0
-        moon_interior = np.hypot(grid_x - moon_x, grid_y - 40.0) <= 17.0
-        visible_interior = solar_interior & ~moon_interior
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        if np.any(visible_interior):
-            checked_frames += 1
-            assert np.all(gray[visible_interior] > 30)
-    assert checked_frames >= 2
+    bright_frames = sum(
+        np.any(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) > 30) for image in decoded_frames
+    )
+    assert bright_frames >= 2
+
+    archive_config = replace(
+        config,
+        render=replace(config.render, output="output/test.mkv", codec="ffv1"),
+    )
+    archive_output = render_project(archive_config, report)
+    archive_capture = cv2.VideoCapture(str(archive_output))
+    archive_frames = []
+    while True:
+        available, image = archive_capture.read()
+        if not available:
+            break
+        archive_frames.append(image)
+    archive_capture.release()
+    assert len(archive_frames) == 4
+    for output_image, source_frame in zip(
+        (archive_frames[0], archive_frames[-1]),
+        (frames[0], frames[-1]),
+        strict=True,
+    ):
+        source_image = cv2.imread(str(tmp_path / source_frame.filename), cv2.IMREAD_COLOR)
+        expected_rgb = align_frame(
+            source_image,
+            source_frame,
+            output_width=64,
+            output_height=80,
+            crop_size=256,
+        )
+        assert np.array_equal(output_image, cv2.cvtColor(expected_rgb, cv2.COLOR_RGB2BGR))

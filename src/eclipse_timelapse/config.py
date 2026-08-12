@@ -28,17 +28,19 @@ class AnalysisConfig:
 
 @dataclass(frozen=True, slots=True)
 class RenderConfig:
-    output: str = "output/eclipse_timelapse_strict_linear_4x5.mp4"
+    output: str = "output/eclipse_timelapse_source_anchored_instagram_4x5.mp4"
     resolution: int = 1080
     aspect_ratio: str = "4:5"
     crop_size: int = 2000
-    duration_seconds: float = 15.0
-    frames_per_second: int = 30
+    duration_seconds: float = 26.25
+    frames_per_second: int = 60
     timeline: str = "linear"
     interpolation: str = "physical"
+    source_anchors: bool = True
     maximum_gap_seconds: float = 30.0
     minimum_gap_seconds: float = 1.0
     exclude_blurry: bool = True
+    codec: str = "h264"
     crf: int = 16
     preset: str = "slow"
 
@@ -117,8 +119,17 @@ class ProjectConfig:
             raise ConfigurationError(
                 "render.interpolation must be physical, morph, geometry, or crossfade"
             )
+        if render.source_anchors and render.interpolation != "physical":
+            raise ConfigurationError(
+                "render.source_anchors requires render.interpolation = 'physical'"
+            )
         if render.maximum_gap_seconds <= 0 or render.minimum_gap_seconds <= 0:
             raise ConfigurationError("render gap settings must be positive")
+        if render.codec not in {"h264", "ffv1"}:
+            raise ConfigurationError("render.codec must be h264 or ffv1")
+        output_suffix = Path(render.output).suffix.lower()
+        if render.codec == "ffv1" and output_suffix not in {".mkv", ".avi"}:
+            raise ConfigurationError("render.codec = 'ffv1' requires an .mkv or .avi output")
         if not 0 <= render.crf <= 51:
             raise ConfigurationError("render.crf must be between 0 and 51")
 

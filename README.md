@@ -6,14 +6,16 @@ formats.
 
 It detects the solar and lunar limbs, centres every exposure, reports soft
 frames, reconstructs a clean solar texture, and renders the eclipse from a
-globally fitted physical model into an H.264 MP4. Output resolution, crop,
-duration, frame rate, quality, timing, and interpolation are configurable.
+globally fitted physical model. Source-anchor rendering passes exactly through
+every aligned photograph, while H.264 delivery and lossless FFV1 archival
+outputs are both supported. Output resolution, crop, duration, frame rate,
+quality, timing, and interpolation are configurable.
 
 ## Why this exists
 
 An ordinary image sequence assigns every photograph the same duration. That
 distorts an irregularly photographed event. The default clock-linear timeline
-instead anchors every photograph at its real normalized capture time. If two
+instead preserves every photograph's real normalized capture time. If two
 photographs are 10 seconds apart, the generated eclipse is exactly 25% of the
 way between them after 2.5 seconds, 50% after 5 seconds, and 75% after 7.5
 seconds.
@@ -28,6 +30,14 @@ observations and rendered as a moving detail layer; when no sufficiently long,
 consistent track exists, detail remains neutral rather than acquiring invented
 motion. Optional compressed timelines remain available when a long real-world
 gap would otherwise occupy more of the finished film than desired.
+
+The project configuration also enables source anchors. Each original is given
+its own ordered output frame as close as possible to its ideal clock-linear
+position. At that frame, the renderer emits only the aligned 4:5 crop of that
+photograph—no texture atlas, synthetic lunar geometry, mask, local retouching,
+or blend. A smooth residual interpolation joins the physical reconstruction to
+the neighbouring source anchors. The JSON report records every assignment,
+timing offset, blur flag, and SHA-256 digest of the pre-encode aligned pixels.
 
 ## Requirements
 
@@ -95,7 +105,9 @@ Other useful controls include:
 ```sh
 uv run eclipse-timelapse render --duration 20 --fps 60
 uv run eclipse-timelapse render --timeline capped
-uv run eclipse-timelapse render --interpolation crossfade
+uv run eclipse-timelapse render --interpolation crossfade --no-source-anchors
+uv run eclipse-timelapse render --source-anchors
+uv run eclipse-timelapse render --no-source-anchors
 uv run eclipse-timelapse render --include-blurry
 uv run eclipse-timelapse render --exclude-blurry
 ```
@@ -106,6 +118,32 @@ modes are `physical` (default), `morph`, `geometry`, and `crossfade`.
 Every timeline mode uses a linear fraction within each pair of photographs; the
 mode changes only how much of the finished clip is allocated to each capture
 gap.
+
+## Source-faithful master and Instagram copy
+
+The tracked defaults produce a 26.25-second, 60 FPS, 1080×1350 H.264 MP4. That
+1,575-frame grid gives all 92 photographs a distinct ordered frame; the render
+report records the small unavoidable grid offsets around the one pair of files
+whose EXIF timestamps are identical.
+
+Create the Instagram delivery file with:
+
+```sh
+uv run eclipse-timelapse render
+```
+
+Create a lossless archival master with the identical frame sequence using:
+
+```sh
+uv run eclipse-timelapse render \
+  --codec ffv1 \
+  --output output/eclipse_timelapse_source_anchored_master_4x5.mkv
+```
+
+FFV1 preserves the rendered RGB anchor pixels exactly. H.264 and Instagram both
+re-encode pixels, and Instagram may also convert 60 FPS video to 30 FPS; the
+lossless master and its JSON audit report are therefore the authoritative
+source-faithful artifacts.
 
 ## Blur controls
 
@@ -120,8 +158,10 @@ uv run eclipse-timelapse render --include-blurry
 ```
 
 The threshold is applied during `analyze` or `run`. The render policy never
-deletes a photograph; it only chooses whether flagged frames participate in the
-video.
+deletes a photograph. With source anchors enabled, blur-flagged photographs
+still appear on their assigned anchor frames but are excluded from texture
+reconstruction. With source anchors disabled, the flag controls whether they
+participate in the video at all.
 
 ## Default workflow
 
@@ -132,19 +172,22 @@ video.
 5. Align the solar centre with a single affine resampling operation.
 6. Reconstruct available solar texture from the aligned observations.
 7. Fit one smooth lunar trajectory across the geometrically reliable frames.
-8. Map each photograph to its exact clock-linear position and render analytic
-   solar and lunar masks.
-9. Stream RGB frames directly into H.264 with BT.709 colour metadata.
+8. Assign every photograph a unique, minimum-error frame near its ideal
+   clock-linear position.
+9. Pass through the aligned source pixels at every anchor and smoothly render
+   the intervals between them.
+10. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.
 
-The original photographs are never edited. Blurry frames are reported and
-excluded from the default render, but never deleted.
+The original files are never edited. Blur-flagged photographs remain in the
+default source-anchored render but do not influence its reconstructed texture.
 
 ## Outputs
 
 - `work/analysis.json`: complete machine-readable detection report
 - `work/analysis.csv`: spreadsheet-friendly frame measurements
 - `work/contact-sheet.jpg`: aligned visual review with blur flags
-- `output/*.mp4`: rendered video
+- `output/*.mp4`: Instagram-oriented H.264 video
+- `output/*.mkv`: lossless FFV1 archival master
 - `output/*-poster.jpg`: representative still
 - `output/*.json`: render parameters, frame selection, and SHA-256 digest
 

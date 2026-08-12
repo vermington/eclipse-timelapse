@@ -51,6 +51,16 @@ class _DetailMotion:
     median_residual: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class _SourceAnchor:
+    """One source photograph placed on a unique output frame."""
+
+    source_index: int
+    ideal_frame: float
+    output_frame: int
+    timing_offset_seconds: float
+
+
 def align_frame(
     image: np.ndarray,
     frame: FrameAnalysis,
@@ -175,6 +185,8 @@ class _AlignedFrameCache:
         self,
         solar_radius: float,
         progress: ProgressCallback | None = None,
+        *,
+        skip_blurry: bool = False,
     ) -> np.ndarray:
         """Build a colour-consistent texture whose reliable detail moves over time."""
         self.solar_mask = _disc_coverage(
@@ -191,6 +203,8 @@ class _AlignedFrameCache:
         features: list[_DetailFeature] = []
         frame_chromas: list[np.ndarray] = []
         for index, frame in enumerate(self.frames):
+            if skip_blurry and frame.blurry:
+                continue
             image = self.get(index)
             layer = _extract_solar_detail(
                 image,
@@ -230,6 +244,8 @@ class _AlignedFrameCache:
         detail_sum = np.zeros((self.output_height, self.output_width), dtype=np.float32)
         detail_weight = np.zeros((self.output_height, self.output_width), dtype=np.float32)
         for index, frame in enumerate(self.frames):
+            if skip_blurry and frame.blurry:
+                continue
             image = self.get(index)
             layer = _extract_solar_detail(
                 image,
@@ -499,13 +515,209 @@ def _fit_detail_motion(
     )
 
 
+def _schedule_source_anchors(
+    positions: np.ndarray,
+    *,
+    total_frames: int,
+    frames_per_second: int,
+) -> tuple[_SourceAnchor, ...]:
+    """Assign every source to a unique ordered frame with minimum squared error."""
+    source_count = len(positions)
+    if source_count > total_frames:
+        raise RenderError(
+            f"Cannot place {source_count} source anchors in only {total_frames} output frames"
+        )
+    if source_count < 2:
+        raise RenderError("At least two source anchors are required")
+
+    ideal_frames = np.asarray(positions, dtype=np.float64) * (total_frames - 1)
+    costs = np.full(total_frames, np.inf, dtype=np.float64)
+    costs[0] = ideal_frames[0] ** 2
+    parents = np.full((source_count, total_frames), -1, dtype=np.int32)
+
+    for source_index in range(1, source_count):
+        prefix_best = np.empty(total_frames, dtype=np.int32)
+        best_index = 0
+        for output_frame in range(total_frames):
+            if costs[output_frame] < costs[best_index]:
+                best_index = output_frame
+            prefix_best[output_frame] = best_index
+
+        updated = np.full(total_frames, np.inf, dtype=np.float64)
+        minimum_frame = source_index
+        maximum_frame = total_frames - (source_count - source_index)
+        if source_index == source_count - 1:
+            minimum_frame = total_frames - 1
+        for output_frame in range(minimum_frame, maximum_frame + 1):
+            parent = int(prefix_best[output_frame - 1])
+            if np.isfinite(costs[parent]):
+                updated[output_frame] = costs[parent] + (
+                    output_frame - ideal_frames[source_index]
+                ) ** 2
+                parents[source_index, output_frame] = parent
+        costs = updated
+
+    output_frame = total_frames - 1
+    if not np.isfinite(costs[output_frame]):
+        raise RenderError("Could not construct a strictly ordered source-anchor schedule")
+    assigned_frames = [output_frame]
+    for source_index in range(source_count - 1, 0, -1):
+        output_frame = int(parents[source_index, output_frame])
+        if output_frame < 0:
+            raise RenderError("Source-anchor schedule backtracking failed")
+        assigned_frames.append(output_frame)
+    assigned_frames.reverse()
+
+    return tuple(
+        _SourceAnchor(
+            source_index=source_index,
+            ideal_frame=float(ideal_frames[source_index]),
+            output_frame=assigned_frame,
+            timing_offset_seconds=(assigned_frame - ideal_frames[source_index])
+            / frames_per_second,
+        )
+        for source_index, assigned_frame in enumerate(assigned_frames)
+    )
+
+
+class _SourceAnchorInterpolator:
+    """Produce a continuous physical render that passes exactly through each source."""
+
+    def __init__(
+        self,
+        cache: _AlignedFrameCache,
+        positions: np.ndarray,
+        anchors: tuple[_SourceAnchor, ...],
+        total_frames: int,
+    ) -> None:
+        self.cache = cache
+        self.positions = positions
+        self.anchors = anchors
+        self.total_frames = total_frames
+        self.output_frames = np.asarray(
+            [anchor.output_frame for anchor in anchors],
+            dtype=np.int32,
+        )
+        self.residual_cache: OrderedDict[int, np.ndarray] = OrderedDict()
+
+    def render(self, output_frame: int) -> np.ndarray:
+        """Render one frame, returning the aligned source unchanged at every anchor."""
+        insertion = int(np.searchsorted(self.output_frames, output_frame, side="left"))
+        if insertion < len(self.anchors):
+            anchor = self.anchors[insertion]
+            if anchor.output_frame == output_frame:
+                return self.cache.get(anchor.source_index).copy()
+
+        right_index = min(max(insertion, 1), len(self.anchors) - 1)
+        left_index = right_index - 1
+        left_anchor = self.anchors[left_index]
+        right_anchor = self.anchors[right_index]
+        interval = right_anchor.output_frame - left_anchor.output_frame
+        fraction = (output_frame - left_anchor.output_frame) / interval
+        smooth_fraction = fraction * fraction * (3.0 - 2.0 * fraction)
+
+        texture = self._physical_texture(output_frame)
+        left_residual = self._anchor_interior_residual(left_index)
+        right_residual = self._anchor_interior_residual(right_index)
+        corrected = (
+            texture
+            + left_residual * (1.0 - smooth_fraction)
+            + right_residual * smooth_fraction
+        )
+
+        left_distance = self.cache.signed_distance(left_anchor.source_index)
+        right_distance = self.cache.signed_distance(right_anchor.source_index)
+        target_distance = (
+            left_distance * (1.0 - smooth_fraction) + right_distance * smooth_fraction
+        )
+        target_mask = np.clip((target_distance + 1.0) / 2.0, 0.0, 1.0)
+        assert self.cache.solar_mask is not None
+        target_mask *= self.cache.solar_mask
+        corrected *= target_mask[:, :, None]
+        return np.uint8(np.clip(np.rint(corrected), 0.0, 255.0))
+
+    def anchor_report(self) -> dict[str, object]:
+        """Return an auditable record of source placement and pre-encode identity."""
+        records = []
+        for anchor in self.anchors:
+            frame = self.cache.frames[anchor.source_index]
+            aligned = self.cache.get(anchor.source_index)
+            records.append(
+                {
+                    "filename": frame.filename,
+                    "captured_at": frame.captured_at.isoformat(),
+                    "blurry": frame.blurry,
+                    "ideal_output_time_seconds": anchor.ideal_frame
+                    / self.cache.render.frames_per_second,
+                    "output_frame": anchor.output_frame,
+                    "output_time_seconds": anchor.output_frame
+                    / self.cache.render.frames_per_second,
+                    "timing_offset_milliseconds": anchor.timing_offset_seconds * 1_000.0,
+                    "aligned_rgb_sha256": hashlib.sha256(aligned.tobytes()).hexdigest(),
+                }
+            )
+        offsets = np.asarray(
+            [anchor.timing_offset_seconds for anchor in self.anchors],
+            dtype=np.float64,
+        )
+        return {
+            "policy": "aligned-source-pass-through",
+            "pre_encode_pixel_identity": True,
+            "encoded_pixel_identity": self.cache.render.codec == "ffv1",
+            "geometric_operations": [
+                "solar-centre alignment",
+                f"{self.cache.render.aspect_ratio} crop",
+                "resize",
+            ],
+            "photometric_operations": [],
+            "anchor_count": len(self.anchors),
+            "all_source_frames_anchored": len(self.anchors) == len(self.cache.frames),
+            "maximum_absolute_timing_offset_milliseconds": float(
+                np.max(np.abs(offsets)) * 1_000.0
+            ),
+            "rms_timing_offset_milliseconds": float(
+                np.sqrt(np.mean(offsets**2)) * 1_000.0
+            ),
+            "frames": records,
+        }
+
+    def _physical_texture(self, output_frame: int) -> np.ndarray:
+        progress = output_frame / (self.total_frames - 1)
+        left, right, alpha = frame_blend(self.positions, progress)
+        return _physical_texture(
+            self.cache.frames[left],
+            self.cache.frames[right],
+            alpha,
+            self.cache,
+        )
+
+    def _anchor_interior_residual(self, anchor_index: int) -> np.ndarray:
+        if anchor_index in self.residual_cache:
+            self.residual_cache.move_to_end(anchor_index)
+            return self.residual_cache[anchor_index]
+        anchor = self.anchors[anchor_index]
+        source = self.cache.get(anchor.source_index)
+        texture = self._physical_texture(anchor.output_frame)
+        edge_margin = max(2.0, self.cache.render.resolution * 0.006)
+        interior_weight = np.clip(
+            (self.cache.signed_distance(anchor.source_index) - edge_margin) / edge_margin,
+            0.0,
+            1.0,
+        )
+        residual = (source.astype(np.float32) - texture) * interior_weight[:, :, None]
+        self.residual_cache[anchor_index] = residual
+        if len(self.residual_cache) > 4:
+            self.residual_cache.popitem(last=False)
+        return residual
+
+
 def render_project(
     config: ProjectConfig,
     report: AnalysisReport,
     *,
     progress: ProgressCallback | None = None,
 ) -> Path:
-    """Render a configured MP4 and a machine-readable render report."""
+    """Render a configured video and a machine-readable render report."""
     output_file = config.output_file
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with _exclusive_output_lock(output_file):
@@ -519,10 +731,18 @@ def _render_project_unlocked(
     progress: ProgressCallback | None = None,
 ) -> Path:
     render = config.render
-    included = tuple(
-        frame for frame in report.frames if not (render.exclude_blurry and frame.blurry)
-    )
-    excluded = tuple(frame for frame in report.frames if render.exclude_blurry and frame.blurry)
+    if render.source_anchors:
+        included = report.frames
+        excluded: tuple[FrameAnalysis, ...] = ()
+        reconstruction_excluded = tuple(
+            frame for frame in report.frames if render.exclude_blurry and frame.blurry
+        )
+    else:
+        included = tuple(
+            frame for frame in report.frames if not (render.exclude_blurry and frame.blurry)
+        )
+        excluded = tuple(frame for frame in report.frames if render.exclude_blurry and frame.blurry)
+        reconstruction_excluded = excluded
     if len(included) < 2:
         raise RenderError("Fewer than two usable frames remain after filtering")
 
@@ -536,11 +756,34 @@ def _render_project_unlocked(
     temporary_file = output_file.with_name(f".{output_file.stem}.partial{output_file.suffix}")
     cache = _AlignedFrameCache(config.input_directory, included, render)
     if render.interpolation == "physical":
-        cache.prepare_physical_atlas(report.eclipse_model.solar_radius, progress)
+        cache.prepare_physical_atlas(
+            report.eclipse_model.solar_radius,
+            progress,
+            skip_blurry=render.source_anchors and render.exclude_blurry,
+        )
     elif render.interpolation == "morph":
         cache.build_atlas(progress)
     total_frames = max(2, round(render.duration_seconds * render.frames_per_second))
     output_width, output_height = output_dimensions(render)
+    anchors = (
+        _schedule_source_anchors(
+            positions,
+            total_frames=total_frames,
+            frames_per_second=render.frames_per_second,
+        )
+        if render.source_anchors
+        else ()
+    )
+    anchor_interpolator = (
+        _SourceAnchorInterpolator(
+            cache,
+            positions,
+            anchors,
+            total_frames,
+        )
+        if anchors
+        else None
+    )
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     command = [
@@ -561,24 +804,44 @@ def _render_project_unlocked(
         "-i",
         "-",
         "-an",
-        "-c:v",
-        "libx264",
-        "-preset",
-        render.preset,
-        "-crf",
-        str(render.crf),
-        "-pix_fmt",
-        "yuv420p",
-        "-color_primaries",
-        "bt709",
-        "-color_trc",
-        "bt709",
-        "-colorspace",
-        "bt709",
-        "-movflags",
-        "+faststart",
-        str(temporary_file),
     ]
+    if render.codec == "h264":
+        command.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                render.preset,
+                "-crf",
+                str(render.crf),
+                "-pix_fmt",
+                "yuv420p",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+                "-movflags",
+                "+faststart",
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "-c:v",
+                "ffv1",
+                "-level",
+                "3",
+                "-coder",
+                "1",
+                "-context",
+                "1",
+                "-pix_fmt",
+                "gbrp",
+            ]
+        )
+    command.append(str(temporary_file))
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     poster: np.ndarray | None = None
     try:
@@ -586,7 +849,9 @@ def _render_project_unlocked(
         for output_index in range(total_frames):
             video_progress = output_index / (total_frames - 1)
             left, right, alpha = frame_blend(positions, video_progress)
-            if render.interpolation == "physical":
+            if anchor_interpolator is not None:
+                image = anchor_interpolator.render(output_index)
+            elif render.interpolation == "physical":
                 image = _physical_frame(
                     included[left],
                     included[right],
@@ -660,6 +925,7 @@ def _render_project_unlocked(
             [cv2.IMWRITE_JPEG_QUALITY, 95],
         )
     detail_motion = cache.detail_motion if render.interpolation == "physical" else None
+    anchor_report = anchor_interpolator.anchor_report() if anchor_interpolator else None
     _write_render_report(
         output_file,
         render,
@@ -667,6 +933,8 @@ def _render_project_unlocked(
         excluded,
         total_frames,
         detail_motion=detail_motion,
+        source_anchor_report=anchor_report,
+        reconstruction_excluded=reconstruction_excluded,
     )
     return output_file
 
@@ -751,14 +1019,9 @@ def _physical_frame(
     model: EclipseModel,
 ) -> np.ndarray:
     """Render one exposure from a fixed Sun and a clock-linear lunar trajectory."""
-    assert cache.atlas is not None
-    assert cache.atlas_brightness is not None
-    assert cache.atlas_chroma is not None
-    assert cache.atlas_detail is not None
     assert cache.solar_mask is not None
 
-    interval_seconds = (right_frame.captured_at - left_frame.captured_at).total_seconds()
-    captured_at = left_frame.captured_at + timedelta(seconds=interval_seconds * alpha)
+    captured_at = _interpolated_capture_time(left_frame, right_frame, alpha)
     moon_offset_x, moon_offset_y = model.moon_center_at(captured_at)
     moon_x = cache.output_width / 2.0 + moon_offset_x * cache.scale
     moon_y = cache.output_height / 2.0 + moon_offset_y * cache.scale
@@ -769,10 +1032,27 @@ def _physical_frame(
         moon_y,
         model.moon_radius * cache.scale,
     )
-    eclipse_mask = cache.solar_mask * (1.0 - moon_mask)
+    texture = _physical_texture(left_frame, right_frame, alpha, cache)
+    texture *= 1.0 - moon_mask[:, :, None]
+    return np.uint8(np.clip(np.rint(texture), 0, 255))
+
+
+def _physical_texture(
+    left_frame: FrameAnalysis,
+    right_frame: FrameAnalysis,
+    alpha: float,
+    cache: _AlignedFrameCache,
+) -> np.ndarray:
+    """Render the moving solar texture without applying the lunar silhouette."""
+    assert cache.atlas is not None
+    assert cache.atlas_brightness is not None
+    assert cache.atlas_chroma is not None
+    assert cache.atlas_detail is not None
+    assert cache.solar_mask is not None
 
     target_brightness = left_frame.brightness * (1.0 - alpha) + right_frame.brightness * alpha
     brightness_gain = target_brightness / cache.atlas_brightness
+    captured_at = _interpolated_capture_time(left_frame, right_frame, alpha)
     detail_elapsed = (captured_at - cache.detail_motion.reference_time).total_seconds()
     if (
         cache.detail_motion.velocity_x_pixels_per_second
@@ -805,8 +1085,17 @@ def _physical_frame(
         moving_detail = cache.atlas_detail
     texture_luminance = 128.0 + moving_detail
     image = texture_luminance[:, :, None] * brightness_gain * cache.atlas_chroma[None, None, :]
-    image *= eclipse_mask[:, :, None]
-    return np.uint8(np.clip(np.rint(image), 0, 255))
+    image *= cache.solar_mask[:, :, None]
+    return image
+
+
+def _interpolated_capture_time(
+    left_frame: FrameAnalysis,
+    right_frame: FrameAnalysis,
+    alpha: float,
+) -> datetime:
+    interval_seconds = (right_frame.captured_at - left_frame.captured_at).total_seconds()
+    return left_frame.captured_at + timedelta(seconds=interval_seconds * alpha)
 
 
 def _geometry_blend(
@@ -883,6 +1172,8 @@ def _write_render_report(
     total_frames: int,
     *,
     detail_motion: _DetailMotion | None = None,
+    source_anchor_report: dict[str, object] | None = None,
+    reconstruction_excluded: tuple[FrameAnalysis, ...] = (),
 ) -> None:
     digest = hashlib.sha256()
     with output_file.open("rb") as video_file:
@@ -895,10 +1186,15 @@ def _write_render_report(
         "encoded_frames": total_frames,
         "included_source_frames": [frame.filename for frame in included],
         "excluded_blurry_frames": [frame.filename for frame in excluded],
+        "excluded_blurry_from_reconstruction": [
+            frame.filename for frame in reconstruction_excluded
+        ],
     }
     if detail_motion is not None:
         motion_payload = asdict(detail_motion)
         motion_payload["reference_time"] = detail_motion.reference_time.isoformat()
         payload["solar_detail_motion"] = motion_payload
+    if source_anchor_report is not None:
+        payload["source_anchors"] = source_anchor_report
     report_file = output_file.with_suffix(".json")
     report_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

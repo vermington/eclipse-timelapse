@@ -11,6 +11,7 @@ def test_run_overrides_blur_policy_threshold_and_aspect_ratio() -> None:
             "--blur-threshold",
             "0.8",
             "--include-blurry",
+            "--no-source-anchors",
             "--aspect-ratio",
             "4:5",
         ]
@@ -19,4 +20,5 @@ def test_run_overrides_blur_policy_threshold_and_aspect_ratio() -> None:
 
     assert config.analysis.blur_threshold == 0.8
     assert config.render.exclude_blurry is False
+    assert config.render.source_anchors is False
     assert output_dimensions(config.render) == (1080, 1350)

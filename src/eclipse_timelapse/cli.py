@@ -68,7 +68,26 @@ def _add_render_overrides(parser: argparse.ArgumentParser) -> None:
         choices=("physical", "morph", "geometry", "crossfade"),
         help="transition strategy; physical preserves centring and clean edges",
     )
-    parser.add_argument("--output", type=str, help="output MP4 path, relative to the project")
+    anchor_group = parser.add_mutually_exclusive_group()
+    anchor_group.add_argument(
+        "--source-anchors",
+        dest="source_anchors",
+        action="store_true",
+        default=None,
+        help="pass through every aligned source photograph on its own scheduled frame",
+    )
+    anchor_group.add_argument(
+        "--no-source-anchors",
+        dest="source_anchors",
+        action="store_false",
+        help="render every frame from the selected interpolation model",
+    )
+    parser.add_argument(
+        "--codec",
+        choices=("h264", "ffv1"),
+        help="H.264 for delivery MP4 or lossless FFV1 for an archival MKV",
+    )
+    parser.add_argument("--output", type=str, help="output video path, relative to the project")
     blur_group = parser.add_mutually_exclusive_group()
     blur_group.add_argument(
         "--include-blurry",
@@ -100,6 +119,8 @@ def _with_overrides(config: ProjectConfig, arguments: argparse.Namespace) -> Pro
         ("fps", "frames_per_second"),
         ("timeline", "timeline"),
         ("interpolation", "interpolation"),
+        ("source_anchors", "source_anchors"),
+        ("codec", "codec"),
         ("output", "output"),
     ):
         value = getattr(arguments, argument, None)

@@ -1,0 +1,23 @@
+[input]
+directory = "."
+pattern = "Eclipse_*.JPG"
+
+[analysis]
+work_directory = "work"
+detection_threshold = 20
+minimum_component_pixels = 2000
+blur_threshold = 0.65
+
+[render]
+output = "output/eclipse_timelapse_1080.mp4"
+resolution = 1080
+crop_size = 2400
+duration_seconds = 15.0
+frames_per_second = 30
+timeline = "logarithmic"
+interpolation = "morph"
+maximum_gap_seconds = 30.0
+minimum_gap_seconds = 1.0
+exclude_blurry = true
+crf = 16
+preset = "slow"

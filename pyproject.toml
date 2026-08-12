@@ -7,7 +7,36 @@ name = "eclipse-timelapse"
 version = "0.1.0"
 description = "Align and render timestamp-aware eclipse timelapses"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
+dependencies = [
+    "imageio-ffmpeg>=0.6,<1",
+    "numpy>=2,<3",
+    "opencv-python-headless>=4.10,<6",
+    "Pillow>=11,<13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "ruff>=0.8,<1",
+]
+
+[project.scripts]
+eclipse-timelapse = "eclipse_timelapse.cli:main"
 
 [tool.setuptools]
-packages = []
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

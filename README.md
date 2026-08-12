@@ -1,7 +1,8 @@
 # Eclipse Timelapse
 
 A non-destructive command-line pipeline that turns hand-held eclipse photographs
-into an aligned, square, timestamp-aware timelapse.
+into an aligned, timestamp-aware timelapse in square, portrait, or landscape
+formats.
 
 It detects the solar and lunar limbs, centres every exposure, reports soft
 frames, compresses irregular capture gaps, morphs between observed crescent
@@ -51,7 +52,23 @@ uv run eclipse-timelapse run
 `analyze` writes `work/analysis.json`, `work/analysis.csv`, and a labelled contact
 sheet. `render` consumes the JSON report. `run` performs both steps.
 
-## Rendering at a higher resolution
+## Aspect ratio and resolution
+
+The default is a 1:1 square. For an Instagram feed post, 4:5 portrait uses more
+screen area while keeping the eclipse visually prominent:
+
+```sh
+uv run eclipse-timelapse render \
+  --aspect-ratio 4:5 \
+  --resolution 1080 \
+  --crop-size 2000 \
+  --output output/eclipse_timelapse_instagram_4x5.mp4
+```
+
+`resolution` is the output width, so that command produces 1080×1350. A 9:16
+ratio is also accepted for Reels, as are arbitrary positive integer ratios.
+
+For a higher-resolution square render:
 
 CLI options override the tracked configuration without changing it:
 
@@ -62,9 +79,10 @@ uv run eclipse-timelapse render \
   --output output/eclipse_timelapse_2160.mp4
 ```
 
-The source crop and output resolution are independent. Keeping `crop-size` at or
-above `resolution` avoids upscaling. Both dimensions are square; the output size
-must be even for broad H.264 compatibility.
+The source crop width and output width are independent. Keeping `crop-size` at
+or above `resolution` avoids upscaling. The corresponding heights are derived
+from the chosen aspect ratio, and codec dimensions are kept even for broad H.264
+compatibility.
 
 Other useful controls include:
 
@@ -73,11 +91,28 @@ uv run eclipse-timelapse render --duration 20 --fps 60
 uv run eclipse-timelapse render --timeline capped
 uv run eclipse-timelapse render --interpolation crossfade
 uv run eclipse-timelapse render --include-blurry
+uv run eclipse-timelapse render --exclude-blurry
 ```
 
 Supported timeline modes are `uniform`, `linear`, `capped`, and `logarithmic`.
 Supported interpolation modes are `morph` (default), `geometry`, and
 `crossfade`.
+
+## Blur controls
+
+Every analysis records a normalized sharpness score in JSON and CSV and labels
+flagged frames in red on the contact sheet. A frame is considered blurry when
+its score is below `analysis.blur_threshold` (default `0.65`). Higher thresholds
+flag more photographs:
+
+```sh
+uv run eclipse-timelapse run --blur-threshold 0.8 --exclude-blurry
+uv run eclipse-timelapse render --include-blurry
+```
+
+The threshold is applied during `analyze` or `run`. The render policy never
+deletes a photograph; it only chooses whether flagged frames participate in the
+video.
 
 ## Default workflow
 

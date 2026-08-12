@@ -30,6 +30,7 @@ class AnalysisConfig:
 class RenderConfig:
     output: str = "output/eclipse_timelapse_1080.mp4"
     resolution: int = 1080
+    aspect_ratio: str = "1:1"
     crop_size: int = 2400
     duration_seconds: float = 15.0
     frames_per_second: int = 30
@@ -97,6 +98,11 @@ class ProjectConfig:
             raise ConfigurationError("analysis.blur_threshold must be positive")
         if render.resolution < 64 or render.resolution % 2:
             raise ConfigurationError("render.resolution must be an even integer of at least 64")
+        output_width, output_height = output_dimensions(render)
+        if output_width < 64 or output_height < 64:
+            raise ConfigurationError(
+                "render aspect ratio produces an output smaller than 64 pixels"
+            )
         if render.crop_size < 64:
             raise ConfigurationError("render.crop_size must be at least 64")
         if render.duration_seconds <= 0:
@@ -120,3 +126,27 @@ def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigurationError(f"[{name}] must be a TOML table")
     return value
+
+
+def aspect_ratio_parts(value: str) -> tuple[int, int]:
+    """Parse a width:height aspect ratio."""
+    try:
+        width_text, height_text = value.split(":", maxsplit=1)
+        width = int(width_text)
+        height = int(height_text)
+    except (AttributeError, ValueError) as error:
+        raise ConfigurationError(
+            f"render.aspect_ratio must use positive integers such as 1:1 or 4:5, got {value!r}"
+        ) from error
+    if width <= 0 or height <= 0:
+        raise ConfigurationError("render.aspect_ratio values must be positive")
+    return width, height
+
+
+def output_dimensions(render: RenderConfig) -> tuple[int, int]:
+    """Return codec-safe output dimensions, treating resolution as the width."""
+    ratio_width, ratio_height = aspect_ratio_parts(render.aspect_ratio)
+    height = round(render.resolution * ratio_height / ratio_width)
+    if height % 2:
+        height += 1
+    return render.resolution, height

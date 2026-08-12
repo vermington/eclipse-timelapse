@@ -30,7 +30,7 @@ def test_detects_and_centres_synthetic_crescent(tmp_path) -> None:
         blurry=False,
         **result,
     )
-    aligned = align_frame(image, frame, resolution=600, crop_size=600)
+    aligned = align_frame(image, frame, output_width=600, output_height=600, crop_size=600)
     gray = cv2.cvtColor(aligned, cv2.COLOR_RGB2GRAY)
     _, bright = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY)
     _, _, _, centroids = cv2.connectedComponentsWithStats(bright)

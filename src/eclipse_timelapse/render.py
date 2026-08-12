@@ -16,7 +16,7 @@ import cv2
 import imageio_ffmpeg
 import numpy as np
 
-from eclipse_timelapse.config import ProjectConfig, RenderConfig
+from eclipse_timelapse.config import ProjectConfig, RenderConfig, output_dimensions
 from eclipse_timelapse.model import AnalysisReport, FrameAnalysis
 from eclipse_timelapse.timeline import frame_blend, timeline_positions
 
@@ -31,15 +31,16 @@ def align_frame(
     image: np.ndarray,
     frame: FrameAnalysis,
     *,
-    resolution: int,
+    output_width: int,
+    output_height: int,
     crop_size: int,
 ) -> np.ndarray:
-    """Centre the detected solar disc and produce a square RGB frame."""
-    scale = resolution / crop_size
+    """Centre the detected solar disc and produce one RGB frame."""
+    scale = output_width / crop_size
     transform = np.asarray(
         [
-            [scale, 0.0, resolution / 2.0 - scale * frame.center_x],
-            [0.0, scale, resolution / 2.0 - scale * frame.center_y],
+            [scale, 0.0, output_width / 2.0 - scale * frame.center_x],
+            [0.0, scale, output_height / 2.0 - scale * frame.center_y],
         ],
         dtype=np.float64,
     )
@@ -47,7 +48,7 @@ def align_frame(
     aligned_bgr = cv2.warpAffine(
         image,
         transform,
-        (resolution, resolution),
+        (output_width, output_height),
         flags=interpolation,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
@@ -70,8 +71,10 @@ class _AlignedFrameCache:
         self.cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self.mask_cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self.distance_cache: OrderedDict[int, np.ndarray] = OrderedDict()
-        coordinates = np.arange(render.resolution, dtype=np.float32)
-        self.grid_x, self.grid_y = np.meshgrid(coordinates, coordinates)
+        self.output_width, self.output_height = output_dimensions(render)
+        x_coordinates = np.arange(self.output_width, dtype=np.float32)
+        y_coordinates = np.arange(self.output_height, dtype=np.float32)
+        self.grid_x, self.grid_y = np.meshgrid(x_coordinates, y_coordinates)
         self.scale = render.resolution / render.crop_size
         self.solar_mask: np.ndarray | None = None
         self.atlas: np.ndarray | None = None
@@ -87,7 +90,8 @@ class _AlignedFrameCache:
         aligned = align_frame(
             image,
             frame,
-            resolution=self.render.resolution,
+            output_width=self.output_width,
+            output_height=self.output_height,
             crop_size=self.render.crop_size,
         )
         self.cache[index] = aligned
@@ -126,8 +130,8 @@ class _AlignedFrameCache:
         """Reconstruct available solar texture for newly revealed morph pixels."""
         if self.atlas is not None:
             return self.atlas
-        atlas = np.zeros((self.render.resolution, self.render.resolution, 3), dtype=np.uint8)
-        best_luminance = np.zeros((self.render.resolution, self.render.resolution), dtype=np.uint8)
+        atlas = np.zeros((self.output_height, self.output_width, 3), dtype=np.uint8)
+        best_luminance = np.zeros((self.output_height, self.output_width), dtype=np.uint8)
         for index, _frame in enumerate(self.frames):
             image = self.get(index)
             luminance = np.max(image, axis=2)
@@ -179,6 +183,7 @@ def _render_project_unlocked(
     if render.interpolation == "morph":
         cache.build_atlas(progress)
     total_frames = max(2, round(render.duration_seconds * render.frames_per_second))
+    output_width, output_height = output_dimensions(render)
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     command = [
@@ -193,7 +198,7 @@ def _render_project_unlocked(
         "-pix_fmt",
         "rgb24",
         "-s",
-        f"{render.resolution}x{render.resolution}",
+        f"{output_width}x{output_height}",
         "-r",
         str(render.frames_per_second),
         "-i",
@@ -378,8 +383,8 @@ def _geometry_blend(
         cache.solar_mask = _disc_coverage(
             cache.grid_x,
             cache.grid_y,
-            cache.render.resolution / 2.0,
-            cache.render.resolution / 2.0,
+            cache.output_width / 2.0,
+            cache.output_height / 2.0,
             solar_radius * cache.scale,
         )
     left_mask = cache.visible_mask(cache.frames.index(left_frame))
@@ -410,10 +415,10 @@ def _aligned_moon_geometry(
     render: RenderConfig,
 ) -> tuple[float, float, float]:
     scale = render.resolution / render.crop_size
-    center = render.resolution / 2.0
+    output_width, output_height = output_dimensions(render)
     return (
-        center + (frame.moon_center_x - frame.center_x) * scale,
-        center + (frame.moon_center_y - frame.center_y) * scale,
+        output_width / 2.0 + (frame.moon_center_x - frame.center_x) * scale,
+        output_height / 2.0 + (frame.moon_center_y - frame.center_y) * scale,
         frame.moon_radius * scale,
     )
 

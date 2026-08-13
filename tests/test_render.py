@@ -376,6 +376,7 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
             resolution=64,
             crop_size=256,
             duration_seconds=0.5,
+            final_hold_seconds=0.25,
             frames_per_second=8,
             interpolation="physical",
             preset="ultrafast",
@@ -413,6 +414,9 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
     assert render_report["source_anchors"]["synthetic_frame_count"] == 0
     assert render_report["excluded_blurry_frames"] == []
     assert render_report["excluded_blurry_from_reconstruction"] == []
+    assert render_report["encoded_frames"] == 6
+    assert render_report["timeline_frames"] == 4
+    assert render_report["final_hold_frames"] == 2
 
     capture = cv2.VideoCapture(str(output))
     decoded_frames = []
@@ -422,7 +426,9 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
             break
         decoded_frames.append(image)
     capture.release()
-    assert len(decoded_frames) == 4
+    assert len(decoded_frames) == 6
+    assert np.mean(cv2.absdiff(decoded_frames[-1], decoded_frames[-2])) < 1.0
+    assert np.mean(cv2.absdiff(decoded_frames[-2], decoded_frames[-3])) < 1.0
 
     bright_frames = sum(
         np.any(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) > 30) for image in decoded_frames
@@ -464,7 +470,9 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
             break
         archive_frames.append(image)
     archive_capture.release()
-    assert len(archive_frames) == 4
+    assert len(archive_frames) == 6
+    assert np.array_equal(archive_frames[-1], archive_frames[-2])
+    assert np.array_equal(archive_frames[-2], archive_frames[-3])
     for output_image, source_frame in zip(
         (archive_frames[0], archive_frames[-1]),
         (frames[0], frames[-1]),

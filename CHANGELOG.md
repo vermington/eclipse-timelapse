@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Configurable final-frame holds that extend the output without stretching the
+  timestamp-aware eclipse timeline.
+
 ## [0.6.4] - 2026-08-13
 
 ### Added

@@ -21,6 +21,8 @@ def test_run_overrides_blur_policy_threshold_and_aspect_ratio() -> None:
             "0.7",
             "--aspect-ratio",
             "4:5",
+            "--final-hold",
+            "2",
         ]
     )
     config = _with_overrides(ProjectConfig.load(Path("eclipse.toml")), options)
@@ -32,4 +34,5 @@ def test_run_overrides_blur_policy_threshold_and_aspect_ratio() -> None:
     assert config.render.ingress_infill_cutoff_seconds == 18.5
     assert config.render.ingress_infill_interval_seconds == 0.6
     assert config.render.ingress_infill_minimum_gap_seconds == 0.7
+    assert config.render.final_hold_seconds == 2.0
     assert output_dimensions(config.render) == (1080, 1350)

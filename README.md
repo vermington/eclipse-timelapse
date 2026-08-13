@@ -135,6 +135,7 @@ Other useful controls include:
 
 ```sh
 uv run eclipse-timelapse render --duration 20 --fps 60
+uv run eclipse-timelapse render --final-hold 2
 uv run eclipse-timelapse render --timeline capped
 uv run eclipse-timelapse render --interpolation crossfade --no-source-anchors
 uv run eclipse-timelapse render --source-anchors
@@ -164,6 +165,10 @@ Create the Instagram delivery file with:
 ```sh
 uv run eclipse-timelapse render
 ```
+
+To append a two-second hold of the exact final rendered frame without stretching
+the clock-linear eclipse timeline, use `--final-hold 2`. The render report records
+the timeline and hold frame counts separately.
 
 Create a lossless archival master with the identical frame sequence using:
 

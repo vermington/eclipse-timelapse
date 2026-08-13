@@ -33,6 +33,7 @@ class RenderConfig:
     aspect_ratio: str = "4:5"
     crop_size: int = 2000
     duration_seconds: float = 26.25
+    final_hold_seconds: float = 0.0
     frames_per_second: int = 60
     timeline: str = "linear"
     interpolation: str = "physical"
@@ -113,6 +114,8 @@ class ProjectConfig:
             raise ConfigurationError("render.crop_size must be at least 64")
         if render.duration_seconds <= 0:
             raise ConfigurationError("render.duration_seconds must be positive")
+        if render.final_hold_seconds < 0:
+            raise ConfigurationError("render.final_hold_seconds cannot be negative")
         if render.frames_per_second < 1:
             raise ConfigurationError("render.frames_per_second must be positive")
         if render.timeline not in {"uniform", "linear", "logarithmic", "capped"}:

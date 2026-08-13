@@ -16,6 +16,7 @@ def test_repository_configuration_is_valid() -> None:
     assert config.render.resolution == 1080
     assert output_dimensions(config.render) == (1080, 1350)
     assert config.render.duration_seconds == 26.25
+    assert config.render.final_hold_seconds == 0.0
     assert config.render.frames_per_second == 60
     assert config.render.timeline == "linear"
     assert config.render.interpolation == "physical"
@@ -57,6 +58,14 @@ def test_ffv1_requires_an_archival_container(tmp_path) -> None:
     )
 
     with pytest.raises(ConfigurationError, match="requires an .mkv or .avi"):
+        ProjectConfig.load(filename)
+
+
+def test_final_hold_cannot_be_negative(tmp_path) -> None:
+    filename = tmp_path / "invalid.toml"
+    filename.write_text("[render]\nfinal_hold_seconds = -1\n", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="cannot be negative"):
         ProjectConfig.load(filename)
 
 

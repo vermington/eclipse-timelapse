@@ -14,6 +14,7 @@ resolution = 1080
 aspect_ratio = "4:5"
 crop_size = 2000
 duration_seconds = 26.25
+final_hold_seconds = 0.0
 frames_per_second = 60
 timeline = "linear"
 interpolation = "physical"

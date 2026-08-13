@@ -954,13 +954,15 @@ def _render_project_unlocked(
         )
     elif render.interpolation == "morph":
         cache.build_atlas(progress)
-    total_frames = max(2, round(render.duration_seconds * render.frames_per_second))
+    timeline_frames = max(2, round(render.duration_seconds * render.frames_per_second))
+    final_hold_frames = round(render.final_hold_seconds * render.frames_per_second)
+    total_frames = timeline_frames + final_hold_frames
     output_width, output_height = output_dimensions(render)
     anchors = (
         _schedule_selected_source_anchors(
             positions,
             selected_source_indices,
-            total_frames=total_frames,
+            total_frames=timeline_frames,
             frames_per_second=render.frames_per_second,
         )
         if render.source_anchors
@@ -970,7 +972,7 @@ def _render_project_unlocked(
         _SourceAnchoredTimeline(
             cache,
             anchors,
-            total_frames=total_frames,
+            total_frames=timeline_frames,
             stable_moon_radius=report.eclipse_model.moon_radius * cache.scale,
         )
         if anchors
@@ -1039,10 +1041,11 @@ def _render_project_unlocked(
     try:
         assert process.stdin is not None
         for output_index in range(total_frames):
+            timeline_index = min(output_index, timeline_frames - 1)
             if source_timeline is not None:
-                image = source_timeline.render(output_index)
+                image = source_timeline.render(timeline_index)
             else:
-                video_progress = output_index / (total_frames - 1)
+                video_progress = timeline_index / (timeline_frames - 1)
                 left, right, alpha = frame_blend(positions, video_progress)
                 if render.interpolation == "physical":
                     image = _physical_frame(
@@ -1085,7 +1088,7 @@ def _render_project_unlocked(
                             alpha,
                             0.0,
                         )
-            if output_index == total_frames // 2:
+            if output_index == timeline_frames // 2:
                 poster = image.copy()
             process.stdin.write(image.tobytes())
             if progress and (
@@ -1135,6 +1138,8 @@ def _render_project_unlocked(
         included,
         excluded,
         total_frames,
+        timeline_frames=timeline_frames,
+        final_hold_frames=final_hold_frames,
         detail_motion=detail_motion,
         source_anchor_report=anchor_report,
         reconstruction_excluded=reconstruction_excluded,
@@ -1374,6 +1379,8 @@ def _write_render_report(
     excluded: tuple[FrameAnalysis, ...],
     total_frames: int,
     *,
+    timeline_frames: int,
+    final_hold_frames: int,
     detail_motion: _DetailMotion | None = None,
     source_anchor_report: dict[str, object] | None = None,
     reconstruction_excluded: tuple[FrameAnalysis, ...] = (),
@@ -1387,6 +1394,8 @@ def _write_render_report(
         "sha256": digest.hexdigest(),
         "parameters": asdict(render),
         "encoded_frames": total_frames,
+        "timeline_frames": timeline_frames,
+        "final_hold_frames": final_hold_frames,
         "included_source_frames": [frame.filename for frame in included],
         "excluded_blurry_frames": [frame.filename for frame in excluded],
         "excluded_blurry_from_reconstruction": [

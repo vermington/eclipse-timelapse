@@ -57,6 +57,11 @@ def _add_render_overrides(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--crop-size", type=int, help="source crop width in pixels")
     parser.add_argument("--duration", type=float, help="video duration in seconds")
+    parser.add_argument(
+        "--final-hold",
+        type=float,
+        help="additional seconds to hold the final rendered frame",
+    )
     parser.add_argument("--fps", type=int, help="frames per second")
     parser.add_argument(
         "--timeline",
@@ -151,6 +156,7 @@ def _with_overrides(config: ProjectConfig, arguments: argparse.Namespace) -> Pro
         ("aspect_ratio", "aspect_ratio"),
         ("crop_size", "crop_size"),
         ("duration", "duration_seconds"),
+        ("final_hold", "final_hold_seconds"),
         ("fps", "frames_per_second"),
         ("timeline", "timeline"),
         ("interpolation", "interpolation"),

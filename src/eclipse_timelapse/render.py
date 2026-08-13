@@ -662,6 +662,7 @@ class _SourceAnchoredTimeline:
         anchors: tuple[_SourceAnchor, ...],
         *,
         total_frames: int,
+        stable_moon_radius: float | None = None,
     ) -> None:
         self.cache = cache
         self.anchors = anchors
@@ -679,6 +680,11 @@ class _SourceAnchoredTimeline:
             gap.left_anchor.output_frame: gap for gap in self.infill_gaps
         }
         self.infill_cache: OrderedDict[tuple[int, int], np.ndarray] = OrderedDict()
+        self.stable_moon_radius = (
+            float(stable_moon_radius)
+            if stable_moon_radius is not None
+            else float(np.median([frame.moon_radius for frame in cache.frames])) * cache.scale
+        )
 
     def render(self, output_frame: int) -> np.ndarray:
         """Return an exact source or a start-source image with added black occlusion."""
@@ -719,8 +725,8 @@ class _SourceAnchoredTimeline:
 
         left_frame = self.cache.frames[gap.left_anchor.source_index]
         right_frame = self.cache.frames[gap.right_anchor.source_index]
-        left_x, left_y, left_radius = _aligned_moon_geometry(left_frame, self.cache.render)
-        right_x, right_y, right_radius = _aligned_moon_geometry(right_frame, self.cache.render)
+        left_x, left_y, _ = _aligned_moon_geometry(left_frame, self.cache.render)
+        right_x, right_y, _ = _aligned_moon_geometry(right_frame, self.cache.render)
         # Include the source's anti-aliased solar limb in the permitted region.
         # The source image already contains that limb coverage; the lunar mask
         # only needs to attenuate it smoothly rather than cutting it on another
@@ -740,7 +746,7 @@ class _SourceAnchoredTimeline:
                 self.cache.grid_y,
                 left_x + (right_x - left_x) * fraction,
                 left_y + (right_y - left_y) * fraction,
-                left_radius + (right_radius - left_radius) * fraction,
+                self.stable_moon_radius,
             )
             np.maximum(new_occlusion, target_coverage, out=new_occlusion)
         new_occlusion *= solar_pixels
@@ -834,6 +840,9 @@ class _SourceAnchoredTimeline:
             "synthetic_boundary_antialiasing": (
                 "two-pixel subpixel lunar coverage band" if has_infill else None
             ),
+            "synthetic_moon_radius_output_pixels": (
+                self.stable_moon_radius if has_infill else None
+            ),
             "post_cutoff_synthetic_frame_count": 0,
             "ingress_infill_cutoff_seconds": self.cache.render.ingress_infill_cutoff_seconds,
             "pre_encode_pixel_identity": True,
@@ -852,7 +861,8 @@ class _SourceAnchoredTimeline:
                 else []
             ),
             "infill_geometry": (
-                "linear interpolation of detected endpoint lunar circles"
+                "linear interpolation of detected endpoint lunar centres with one "
+                "globally fitted constant lunar radius"
                 if has_infill
                 else None
             ),
@@ -933,6 +943,7 @@ def _render_project_unlocked(
             cache,
             anchors,
             total_frames=total_frames,
+            stable_moon_radius=report.eclipse_model.moon_radius * cache.scale,
         )
         if anchors
         else None

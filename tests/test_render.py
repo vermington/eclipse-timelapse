@@ -202,6 +202,60 @@ def test_sparse_ingress_infill_only_subtractively_occludes_gap_start_pixels(
     )
 
 
+def test_sparse_ingress_infill_uses_one_robust_moon_radius(tmp_path) -> None:
+    source_size = 128
+    frames = []
+    for index, moon_radius in enumerate((25.0, 31.0, 43.0)):
+        image = np.zeros((source_size, source_size, 3), dtype=np.uint8)
+        cv2.circle(image, (64, 64), 30, (100, 130, 180), thickness=-1)
+        filename = f"radius-{index}.png"
+        cv2.imwrite(str(tmp_path / filename), image)
+        frames.append(
+            FrameAnalysis(
+                sequence=index + 1,
+                filename=filename,
+                captured_at=datetime(2026, 8, 12) + timedelta(seconds=index * 10),
+                width=source_size,
+                height=source_size,
+                center_x=64.0,
+                center_y=64.0,
+                radius=30.0,
+                moon_center_x=90.0 - index * 20.0,
+                moon_center_y=64.0,
+                moon_radius=moon_radius,
+                moon_fit_error=0.1,
+                bright_pixels=2_000,
+                brightness=120.0,
+                sharpness=2.0,
+                blurry=False,
+            )
+        )
+
+    render = RenderConfig(
+        resolution=64,
+        aspect_ratio="1:1",
+        crop_size=128,
+        duration_seconds=3.1,
+        frames_per_second=10,
+        ingress_infill_cutoff_seconds=3.0,
+        ingress_infill_minimum_gap_seconds=0.5,
+        ingress_infill_interval_seconds=0.5,
+    )
+    cache = _AlignedFrameCache(tmp_path, tuple(frames), render)
+    anchors = _schedule_source_anchors(
+        np.asarray([0.0, 0.5, 1.0]),
+        total_frames=31,
+        frames_per_second=render.frames_per_second,
+    )
+    timeline = _SourceAnchoredTimeline(cache, anchors, total_frames=31)
+
+    assert timeline.stable_moon_radius == pytest.approx(31.0 * cache.scale)
+    assert timeline.anchor_report()["synthetic_moon_radius_output_pixels"] == pytest.approx(
+        31.0 * cache.scale
+    )
+    assert "constant lunar radius" in timeline.anchor_report()["infill_geometry"]
+
+
 def test_source_anchor_schedule_is_unique_ordered_and_pins_endpoints() -> None:
     positions = np.asarray([0.0, 0.2, 0.2, 0.21, 1.0])
 

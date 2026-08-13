@@ -45,9 +45,12 @@ new boundary state every 0.75 seconds. Each state starts again from the gap's
 first photograph and changes pixels in exactly one permitted way: computed
 lunar coverage darkens newly covered solar pixels, with a narrow two-pixel
 subpixel transition at the Moon's edge and fully covered pixels set to RGB
-black. It never borrows endpoint texture, blends source photographs, moves
-detail, brightens a pixel, changes an unoccluded pixel, or reveals a pixel that
-was previously removed within the gap. The defaults add 18 distinct states
+black. Synthetic states use one robust globally fitted lunar radius rather than
+allowing uncertain short-arc fits to make the Moon appear to change size. Its
+centre still moves linearly between the two observed endpoint positions. It
+never borrows endpoint texture, blends source photographs, moves detail,
+brightens a pixel, changes an unoccluded pixel, or reveals a pixel that was
+previously removed within the gap. The defaults add 18 distinct states
 across six gaps. At and after 19 seconds there is no generated infill; the
 nearest complete photograph is held. The JSON report records every source
 assignment, infill state, timing offset, blur flag, and source SHA-256 digest.
@@ -194,7 +197,8 @@ disabled, the flag controls whether they participate in the video at all.
    clock-linear position.
 7. Add sparse ingress-only states to qualifying pre-cutoff gaps by darkening
    only newly occulted pixels in each gap's starting photograph, using a narrow
-   subpixel edge transition and pure black for full coverage.
+   subpixel edge transition, a robust constant lunar radius, and pure black for
+   full coverage.
 8. Hold the nearest complete aligned photograph everywhere else, including all
    frames at and after the cutoff.
 9. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.

@@ -41,3 +41,19 @@ def test_detects_and_centres_synthetic_crescent(tmp_path) -> None:
     transform_y = expected_y + (result["center_y"] - source_center[1])
     assert abs(transform_x - expected_x) < 3
     assert abs(transform_y - expected_y) < 3
+
+
+def test_outer_limb_fit_centres_a_very_thin_crescent(tmp_path) -> None:
+    source_center = (730, 440)
+    solar_radius = 150
+    image = np.zeros((900, 1200, 3), dtype=np.uint8)
+    cv2.circle(image, source_center, solar_radius, (150, 150, 150), thickness=-1)
+    cv2.circle(image, (750, 450), 155, (0, 0, 0), thickness=-1)
+    filename = tmp_path / "thin-crescent.png"
+    cv2.imwrite(str(filename), image)
+
+    result = detect_frame(filename, threshold=20, minimum_component_pixels=500)
+
+    assert abs(result["center_x"] - source_center[0]) < 1.5
+    assert abs(result["center_y"] - source_center[1]) < 1.5
+    assert abs(result["radius"] - solar_radius) < 2.0

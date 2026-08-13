@@ -72,8 +72,14 @@ def detect_frame(
     component = np.uint8(labels == component_index) * 255
     contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     contour = max(contours, key=cv2.contourArea)
-    (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
+    (initial_center_x, initial_center_y), initial_radius = cv2.minEnclosingCircle(contour)
     contour_points = contour[:, 0, :].astype(np.float64)
+    center_x, center_y, radius, _solar_fit_error = _fit_solar_circle_ransac(
+        contour_points,
+        initial_center_x=float(initial_center_x),
+        initial_center_y=float(initial_center_y),
+        initial_radius=float(initial_radius),
+    )
     distance_from_solar_center = np.hypot(
         contour_points[:, 0] - center_x,
         contour_points[:, 1] - center_y,
@@ -241,6 +247,64 @@ def _write_contact_sheet(
     sheet.save(filename, quality=92, optimize=True)
 
 
+def _fit_solar_circle_ransac(
+    points: np.ndarray,
+    *,
+    initial_center_x: float,
+    initial_center_y: float,
+    initial_radius: float,
+) -> tuple[float, float, float, float]:
+    """Fit the outer solar limb while rejecting the occulting lunar arc."""
+    if len(points) < 20:
+        raise AnalysisError("Too few boundary points to fit the solar disc")
+
+    minimum_radius = initial_radius * 0.94
+    maximum_radius = initial_radius * 1.06
+    maximum_center_shift = initial_radius * 0.20
+    generator = np.random.default_rng(20260813)
+    best_inliers: np.ndarray | None = None
+    best_count = 0
+    for indices in generator.integers(0, len(points), size=(4_000, 3)):
+        candidate = _circle_from_three_points(points[indices])
+        if candidate is None:
+            continue
+        candidate_x, candidate_y, candidate_radius = candidate
+        if not minimum_radius <= candidate_radius <= maximum_radius:
+            continue
+        if (
+            np.hypot(
+                candidate_x - initial_center_x,
+                candidate_y - initial_center_y,
+            )
+            > maximum_center_shift
+        ):
+            continue
+
+        signed_distance = (
+            np.hypot(
+                points[:, 0] - candidate_x,
+                points[:, 1] - candidate_y,
+            )
+            - candidate_radius
+        )
+        # Every illuminated contour point must lie inside the solar disc. The
+        # lunar circle fails this test because the crescent lies outside it.
+        if float(np.mean(signed_distance > 2.5)) > 0.02:
+            continue
+        inliers = np.abs(signed_distance) < 1.5
+        count = int(np.count_nonzero(inliers))
+        if count > best_count:
+            best_count = count
+            best_inliers = inliers
+    if best_inliers is None or best_count < 20:
+        raise AnalysisError("Could not fit a reliable solar limb")
+
+    center_x, center_y, radius, residual = _least_squares_circle(points[best_inliers])
+    if not minimum_radius <= radius <= maximum_radius:
+        raise AnalysisError("Refined solar-limb radius is outside the reliable range")
+    return center_x, center_y, radius, residual
+
+
 def _fit_circle_ransac(
     points: np.ndarray,
     *,
@@ -283,19 +347,23 @@ def _fit_circle_ransac(
     if best_inliers is None or best_count < 20:
         raise AnalysisError("Could not fit a reliable lunar limb")
 
-    inlier_points = points[best_inliers]
+    return _least_squares_circle(points[best_inliers])
+
+
+def _least_squares_circle(points: np.ndarray) -> tuple[float, float, float, float]:
+    """Refine one circle and return its median radial residual."""
     design = np.column_stack(
-        (2.0 * inlier_points[:, 0], 2.0 * inlier_points[:, 1], np.ones(best_count))
+        (2.0 * points[:, 0], 2.0 * points[:, 1], np.ones(len(points)))
     )
-    target = inlier_points[:, 0] ** 2 + inlier_points[:, 1] ** 2
+    target = points[:, 0] ** 2 + points[:, 1] ** 2
     center_x, center_y, constant = np.linalg.lstsq(design, target, rcond=None)[0]
     radius = float(np.sqrt(constant + center_x**2 + center_y**2))
     residual = float(
         np.median(
             np.abs(
                 np.hypot(
-                    inlier_points[:, 0] - center_x,
-                    inlier_points[:, 1] - center_y,
+                    points[:, 0] - center_x,
+                    points[:, 1] - center_y,
                 )
                 - radius
             )

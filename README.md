@@ -111,6 +111,12 @@ or above `resolution` avoids upscaling. The corresponding heights are derived
 from the chosen aspect ratio, and codec dimensions are kept even for broad H.264
 compatibility.
 
+Crop centring uses a robust fit of the visible outer solar limb. This remains
+stable when only a thin crescent is visible, where a minimum circle around the
+illuminated shape would otherwise jump between photographs. The corrected
+centre is applied inside the existing single affine crop, so stabilization does
+not add another resampling pass.
+
 Other useful controls include:
 
 ```sh
@@ -179,7 +185,7 @@ disabled, the flag controls whether they participate in the video at all.
 
 1. Validate EXIF capture times and sort chronologically.
 2. Isolate the largest bright component against the dark sky.
-3. Fit the solar limb and robustly disambiguate the occulting lunar limb.
+3. Robustly fit the outer solar limb, then disambiguate the occulting lunar limb.
 4. Score edge sharpness and flag frames below the configured threshold.
 5. Align the solar centre with a single affine resampling operation.
 6. Assign every photograph a unique, minimum-error frame near its ideal

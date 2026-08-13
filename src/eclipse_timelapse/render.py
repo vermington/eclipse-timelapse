@@ -721,27 +721,34 @@ class _SourceAnchoredTimeline:
         right_frame = self.cache.frames[gap.right_anchor.source_index]
         left_x, left_y, left_radius = _aligned_moon_geometry(left_frame, self.cache.render)
         right_x, right_y, right_radius = _aligned_moon_geometry(right_frame, self.cache.render)
-        solar_pixels = _disc_pixels(
+        # Include the source's anti-aliased solar limb in the permitted region.
+        # The source image already contains that limb coverage; the lunar mask
+        # only needs to attenuate it smoothly rather than cutting it on another
+        # whole-pixel boundary.
+        solar_pixels = _disc_coverage(
             self.cache.grid_x,
             self.cache.grid_y,
             self.cache.output_width / 2.0,
             self.cache.output_height / 2.0,
             left_frame.radius * self.cache.scale,
-        )
-        new_occlusion = np.zeros(solar_pixels.shape, dtype=bool)
+        ) > 0.0
+        new_occlusion = np.zeros(solar_pixels.shape, dtype=np.float32)
         for scheduled_state in gap.states[: state_index + 1]:
             fraction = scheduled_state.gap_fraction
-            target_disc = _disc_pixels(
+            target_coverage = _disc_coverage(
                 self.cache.grid_x,
                 self.cache.grid_y,
                 left_x + (right_x - left_x) * fraction,
                 left_y + (right_y - left_y) * fraction,
                 left_radius + (right_radius - left_radius) * fraction,
             )
-            new_occlusion |= target_disc & solar_pixels
+            np.maximum(new_occlusion, target_coverage, out=new_occlusion)
+        new_occlusion *= solar_pixels
 
-        image = self.cache.get(gap.left_anchor.source_index).copy()
-        image[new_occlusion] = 0
+        source = self.cache.get(gap.left_anchor.source_index)
+        image = np.rint(
+            source.astype(np.float32) * (1.0 - new_occlusion[:, :, None])
+        ).astype(np.uint8)
         self.infill_cache[key] = image
         if len(self.infill_cache) > 2:
             self.infill_cache.popitem(last=False)
@@ -809,7 +816,7 @@ class _SourceAnchoredTimeline:
                 else "aligned-source-pass-through"
             ),
             "intermediate_texture_policy": (
-                "gap-start-source-with-new-lunar-coverage-set-to-black"
+                "gap-start-source-darkened-only-by-new-lunar-subpixel-coverage"
                 if has_infill
                 else "nearest-complete-source-frame-hold"
             ),
@@ -819,9 +826,14 @@ class _SourceAnchoredTimeline:
             "source_output_frame_count": self.total_frames - synthetic_output_frames,
             "pre_encode_all_frames_are_complete_sources": not has_infill,
             "pre_encode_all_anchor_frames_are_complete_sources": True,
-            "pre_encode_all_surviving_pixels_match_gap_start_sources": True,
+            "pre_encode_all_unoccluded_pixels_match_gap_start_sources": True,
+            "pre_encode_all_surviving_pixels_match_gap_start_sources": not has_infill,
             "all_synthetic_frames_derived_from_gap_start": True,
-            "all_synthetic_pixel_changes_are_blackening_only": True,
+            "all_synthetic_pixel_changes_are_blackening_only": not has_infill,
+            "all_synthetic_pixel_changes_are_subtractive_occlusion_only": True,
+            "synthetic_boundary_antialiasing": (
+                "two-pixel subpixel lunar coverage band" if has_infill else None
+            ),
             "post_cutoff_synthetic_frame_count": 0,
             "ingress_infill_cutoff_seconds": self.cache.render.ingress_infill_cutoff_seconds,
             "pre_encode_pixel_identity": True,
@@ -832,7 +844,12 @@ class _SourceAnchoredTimeline:
                 "resize",
             ],
             "photometric_operations": (
-                ["set newly occulted pixels to RGB (0, 0, 0)"] if has_infill else []
+                [
+                    "attenuate newly occulted pixels by computed lunar coverage; "
+                    "fully covered pixels become RGB (0, 0, 0)"
+                ]
+                if has_infill
+                else []
             ),
             "infill_geometry": (
                 "linear interpolation of detected endpoint lunar circles"
@@ -1309,17 +1326,6 @@ def _disc_coverage(
     distance = np.hypot(grid_x - center_x, grid_y - center_y)
     # A two-pixel transition is a stable approximation of the source anti-aliasing.
     return np.clip((radius + 1.0 - distance) / 2.0, 0.0, 1.0)
-
-
-def _disc_pixels(
-    grid_x: np.ndarray,
-    grid_y: np.ndarray,
-    center_x: float,
-    center_y: float,
-    radius: float,
-) -> np.ndarray:
-    """Return whole pixels inside a disc without altering boundary pixel colours."""
-    return (grid_x - center_x) ** 2 + (grid_y - center_y) ** 2 <= radius**2
 
 
 def _write_render_report(

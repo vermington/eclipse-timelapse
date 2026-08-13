@@ -42,9 +42,11 @@ or blend.
 
 Before the configured 19-second cutoff, gaps of at least 0.75 seconds receive a
 new boundary state every 0.75 seconds. Each state starts again from the gap's
-first photograph and changes pixels in exactly one permitted way: newly covered
-solar pixels are set to RGB black. It never borrows endpoint texture, blends
-colour, moves detail, changes a surviving solar pixel, or reveals a pixel that
+first photograph and changes pixels in exactly one permitted way: computed
+lunar coverage darkens newly covered solar pixels, with a narrow two-pixel
+subpixel transition at the Moon's edge and fully covered pixels set to RGB
+black. It never borrows endpoint texture, blends source photographs, moves
+detail, brightens a pixel, changes an unoccluded pixel, or reveals a pixel that
 was previously removed within the gap. The defaults add 18 distinct states
 across six gaps. At and after 19 seconds there is no generated infill; the
 nearest complete photograph is held. The JSON report records every source
@@ -190,8 +192,9 @@ disabled, the flag controls whether they participate in the video at all.
 5. Align the solar centre with a single affine resampling operation.
 6. Assign every photograph a unique, minimum-error frame near its ideal
    clock-linear position.
-7. Add sparse ingress-only states to qualifying pre-cutoff gaps by setting only
-   newly occulted pixels in each gap's starting photograph to black.
+7. Add sparse ingress-only states to qualifying pre-cutoff gaps by darkening
+   only newly occulted pixels in each gap's starting photograph, using a narrow
+   subpixel edge transition and pure black for full coverage.
 8. Hold the nearest complete aligned photograph everywhere else, including all
    frames at and after the cutoff.
 9. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.

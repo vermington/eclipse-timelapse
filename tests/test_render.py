@@ -125,7 +125,9 @@ def test_physical_atlas_normalizes_source_colour_seams(tmp_path) -> None:
     assert anchor_report["anchor_count"] == 2
 
 
-def test_sparse_ingress_infill_only_blacks_gap_start_pixels(tmp_path) -> None:
+def test_sparse_ingress_infill_only_subtractively_occludes_gap_start_pixels(
+    tmp_path,
+) -> None:
     source_size = 128
     frames = []
     for index, moon_x in enumerate((86.0, 54.0)):
@@ -176,11 +178,12 @@ def test_sparse_ingress_infill_only_blacks_gap_start_pixels(tmp_path) -> None:
     base = cache.get(0)
     first_infill = timeline.render(5)
     second_infill = timeline.render(10)
-    unchanged = np.all(first_infill == base, axis=2)
-    black = np.all(first_infill == 0, axis=2)
-    assert np.all(unchanged | black)
-    assert np.any(~unchanged)
-    assert np.all(np.all(first_infill == 0, axis=2) <= np.all(second_infill == 0, axis=2))
+    changed = np.any(first_infill != base, axis=2)
+    fully_black = np.all(first_infill == 0, axis=2)
+    assert np.any(changed)
+    assert np.any(changed & ~fully_black)
+    assert np.all(first_infill <= base)
+    assert np.all(second_infill <= first_infill)
     assert np.array_equal(timeline.render(0), base)
     assert np.array_equal(timeline.render(20), cache.get(1))
     assert np.array_equal(timeline.render(30), cache.get(1))
@@ -190,7 +193,13 @@ def test_sparse_ingress_infill_only_blacks_gap_start_pixels(tmp_path) -> None:
     assert report["synthetic_output_frame_count"] == 15
     assert report["post_cutoff_synthetic_frame_count"] == 0
     assert report["all_synthetic_frames_derived_from_gap_start"] is True
-    assert report["all_synthetic_pixel_changes_are_blackening_only"] is True
+    assert report["all_synthetic_pixel_changes_are_blackening_only"] is False
+    assert report["all_synthetic_pixel_changes_are_subtractive_occlusion_only"] is True
+    assert report["pre_encode_all_unoccluded_pixels_match_gap_start_sources"] is True
+    assert report["pre_encode_all_surviving_pixels_match_gap_start_sources"] is False
+    assert report["synthetic_boundary_antialiasing"] == (
+        "two-pixel subpixel lunar coverage band"
+    )
 
 
 def test_source_anchor_schedule_is_unique_ordered_and_pins_endpoints() -> None:

@@ -179,12 +179,16 @@ flag more photographs:
 ```sh
 uv run eclipse-timelapse run --blur-threshold 0.8 --exclude-blurry
 uv run eclipse-timelapse render --include-blurry
+uv run eclipse-timelapse render --exclude-blurry \
+  --output output/eclipse_timelapse_sharp_only_instagram_4x5.mp4
 ```
 
-The threshold is applied during `analyze` or `run`. The render policy never
-deletes a photograph. With source anchors enabled, blur-flagged photographs
-still appear as complete source frames. With source anchors
-disabled, the flag controls whether they participate in the video at all.
+The threshold is applied during `analyze` or `run`. The default render includes
+every photograph. `--exclude-blurry` omits flagged sources from either renderer;
+in the source-anchored mode, every retained photograph keeps its original
+clock-linear anchor and the nearest sharp photograph is held through each
+omitted slot. `--include-blurry` restores all sources. The files on disk are
+never deleted or edited.
 
 ## Default workflow
 
@@ -204,7 +208,7 @@ disabled, the flag controls whether they participate in the video at all.
 9. Stream RGB frames into either H.264 with BT.709 metadata or lossless FFV1.
 
 The original files are never edited. Blur-flagged photographs remain in the
-default source-anchored render.
+default source-anchored render unless explicitly excluded.
 
 ## Outputs
 

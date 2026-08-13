@@ -16,6 +16,7 @@ from eclipse_timelapse.render import (
     _exclusive_output_lock,
     _fit_detail_motion,
     _physical_frame,
+    _schedule_selected_source_anchors,
     _schedule_source_anchors,
     _SourceAnchoredTimeline,
     align_frame,
@@ -272,6 +273,32 @@ def test_source_anchor_schedule_is_unique_ordered_and_pins_endpoints() -> None:
     assert [anchor.source_index for anchor in anchors] == list(range(len(positions)))
 
 
+def test_filtered_source_anchors_keep_full_timeline_positions() -> None:
+    positions = np.asarray([0.0, 0.2, 0.5, 1.0])
+    complete = _schedule_source_anchors(
+        positions,
+        total_frames=11,
+        frames_per_second=10,
+    )
+
+    filtered = _schedule_selected_source_anchors(
+        positions,
+        (1, 3),
+        total_frames=11,
+        frames_per_second=10,
+    )
+
+    assert [anchor.source_index for anchor in filtered] == [0, 1]
+    assert [anchor.output_frame for anchor in filtered] == [
+        complete[1].output_frame,
+        complete[3].output_frame,
+    ]
+    assert [anchor.ideal_frame for anchor in filtered] == [
+        complete[1].ideal_frame,
+        complete[3].ideal_frame,
+    ]
+
+
 def test_detail_motion_follows_longest_confident_track() -> None:
     reference_time = datetime(2026, 8, 12, 18, 0, 0)
     features = []
@@ -313,7 +340,7 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
     source_size = 256
     center = 128.0
     frames = []
-    for index, moon_x in enumerate((155, 125), start=1):
+    for index, moon_x in enumerate((155, 140, 125), start=1):
         image = np.zeros((source_size, source_size, 3), dtype=np.uint8)
         cv2.circle(image, (128, 128), 60, (140, 140, 140), thickness=-1)
         cv2.circle(image, (moon_x, 128), 62, (0, 0, 0), thickness=-1)
@@ -366,10 +393,10 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
             solar_radius=60.0,
             moon_radius=62.0,
             moon_x_intercept=27.0,
-            moon_x_velocity=-3.0,
+            moon_x_velocity=-1.5,
             moon_y_intercept=0.0,
             moon_y_velocity=0.0,
-            supporting_frames=2,
+            supporting_frames=3,
         ),
         frames=tuple(frames),
     )
@@ -378,7 +405,7 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
 
     render_report = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
     assert "solar_detail_motion" not in render_report
-    assert render_report["source_anchors"]["anchor_count"] == 2
+    assert render_report["source_anchors"]["anchor_count"] == 3
     assert render_report["source_anchors"]["all_source_frames_anchored"] is True
     assert render_report["source_anchors"]["intermediate_texture_policy"] == (
         "nearest-complete-source-frame-hold"
@@ -401,6 +428,28 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
         np.any(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) > 30) for image in decoded_frames
     )
     assert bright_frames >= 2
+
+    filtered_config = replace(
+        config,
+        render=replace(
+            config.render,
+            output="output/filtered.mp4",
+            exclude_blurry=True,
+        ),
+    )
+    filtered_output = render_project(filtered_config, report)
+    filtered_report = json.loads(
+        filtered_output.with_suffix(".json").read_text(encoding="utf-8")
+    )
+    assert filtered_report["included_source_frames"] == ["frame-1.jpg", "frame-3.jpg"]
+    assert filtered_report["excluded_blurry_frames"] == ["frame-2.jpg"]
+    assert filtered_report["source_anchors"]["anchor_count"] == 2
+    assert [
+        frame["output_frame"] for frame in filtered_report["source_anchors"]["frames"]
+    ] == [
+        render_report["source_anchors"]["frames"][0]["output_frame"],
+        render_report["source_anchors"]["frames"][2]["output_frame"],
+    ]
 
     archive_config = replace(
         config,

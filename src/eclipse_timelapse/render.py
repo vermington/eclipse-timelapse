@@ -606,6 +606,30 @@ def _schedule_source_anchors(
     )
 
 
+def _schedule_selected_source_anchors(
+    positions: np.ndarray,
+    selected_source_indices: tuple[int, ...],
+    *,
+    total_frames: int,
+    frames_per_second: int,
+) -> tuple[_SourceAnchor, ...]:
+    """Keep selected sources at their full clock-linear anchor positions."""
+    complete_schedule = _schedule_source_anchors(
+        positions,
+        total_frames=total_frames,
+        frames_per_second=frames_per_second,
+    )
+    return tuple(
+        _SourceAnchor(
+            source_index=filtered_index,
+            ideal_frame=complete_schedule[original_index].ideal_frame,
+            output_frame=complete_schedule[original_index].output_frame,
+            timing_offset_seconds=complete_schedule[original_index].timing_offset_seconds,
+        )
+        for filtered_index, original_index in enumerate(selected_source_indices)
+    )
+
+
 def _schedule_ingress_infill(
     anchors: tuple[_SourceAnchor, ...],
     *,
@@ -898,21 +922,24 @@ def _render_project_unlocked(
     progress: ProgressCallback | None = None,
 ) -> Path:
     render = config.render
-    if render.source_anchors:
-        included = report.frames
-        excluded: tuple[FrameAnalysis, ...] = ()
-        reconstruction_excluded: tuple[FrameAnalysis, ...] = ()
-    else:
-        included = tuple(
-            frame for frame in report.frames if not (render.exclude_blurry and frame.blurry)
-        )
-        excluded = tuple(frame for frame in report.frames if render.exclude_blurry and frame.blurry)
-        reconstruction_excluded = excluded
+    selected_source_indices = tuple(
+        index
+        for index, frame in enumerate(report.frames)
+        if not (render.exclude_blurry and frame.blurry)
+    )
+    included = tuple(report.frames[index] for index in selected_source_indices)
+    excluded = tuple(
+        frame for frame in report.frames if render.exclude_blurry and frame.blurry
+    )
+    reconstruction_excluded = () if render.source_anchors else excluded
     if len(included) < 2:
         raise RenderError("Fewer than two usable frames remain after filtering")
 
     positions = timeline_positions(
-        [frame.captured_at for frame in included],
+        [
+            frame.captured_at
+            for frame in (report.frames if render.source_anchors else included)
+        ],
         mode=render.timeline,
         minimum_gap_seconds=render.minimum_gap_seconds,
         maximum_gap_seconds=render.maximum_gap_seconds,
@@ -930,8 +957,9 @@ def _render_project_unlocked(
     total_frames = max(2, round(render.duration_seconds * render.frames_per_second))
     output_width, output_height = output_dimensions(render)
     anchors = (
-        _schedule_source_anchors(
+        _schedule_selected_source_anchors(
             positions,
+            selected_source_indices,
             total_frames=total_frames,
             frames_per_second=render.frames_per_second,
         )

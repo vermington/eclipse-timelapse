@@ -43,7 +43,7 @@ class RenderConfig:
     ingress_infill_interval_seconds: float = 0.75
     maximum_gap_seconds: float = 30.0
     minimum_gap_seconds: float = 1.0
-    exclude_blurry: bool = True
+    exclude_blurry: bool = False
     codec: str = "h264"
     crf: int = 16
     preset: str = "slow"

@@ -24,7 +24,7 @@ def test_repository_configuration_is_valid() -> None:
     assert config.render.ingress_infill_cutoff_seconds == 19.0
     assert config.render.ingress_infill_minimum_gap_seconds == 0.75
     assert config.render.ingress_infill_interval_seconds == 0.75
-    assert config.render.exclude_blurry is True
+    assert config.render.exclude_blurry is False
 
 
 def test_odd_video_resolution_is_rejected(tmp_path) -> None:

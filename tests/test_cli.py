@@ -36,3 +36,21 @@ def test_run_overrides_blur_policy_threshold_and_aspect_ratio() -> None:
     assert config.render.ingress_infill_minimum_gap_seconds == 0.7
     assert config.render.final_hold_seconds == 2.0
     assert output_dimensions(config.render) == (1080, 1350)
+
+
+def test_annotation_cli_accepts_explicit_artifacts() -> None:
+    options = build_parser().parse_args(
+        [
+            "annotate-centres",
+            "--video",
+            "output/source.mp4",
+            "--report",
+            "output/source.json",
+            "--output",
+            "output/centres.mp4",
+        ]
+    )
+
+    assert options.video == Path("output/source.mp4")
+    assert options.report == Path("output/source.json")
+    assert options.output == Path("output/centres.mp4")

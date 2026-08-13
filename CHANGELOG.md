@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 - Configurable final-frame holds that extend the output without stretching the
   timestamp-aware eclipse timeline.
+- Viewing-only centre annotations with a red stabilized Sun marker and a blue,
+  clock-linear trail through measured Moon centres.
 
 ## [0.6.4] - 2026-08-13
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from eclipse_timelapse import __version__
 from eclipse_timelapse.analysis import AnalysisError, analyse_project
+from eclipse_timelapse.annotate import AnnotationError, annotate_centres
 from eclipse_timelapse.config import ConfigurationError, ProjectConfig
 from eclipse_timelapse.model import AnalysisReport
 from eclipse_timelapse.render import RenderError, render_project
@@ -38,6 +39,26 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="analyse and render the complete project")
     _add_analysis_overrides(run_parser)
     _add_render_overrides(run_parser)
+
+    annotate_parser = subparsers.add_parser(
+        "annotate-centres",
+        help="overlay the solar centre and lunar-centre path on a rendered video",
+    )
+    annotate_parser.add_argument(
+        "--video",
+        type=Path,
+        help="input video (default: configured render output)",
+    )
+    annotate_parser.add_argument(
+        "--report",
+        type=Path,
+        help="matching render report (default: input video with .json suffix)",
+    )
+    annotate_parser.add_argument(
+        "--output",
+        type=Path,
+        help="diagnostic MP4 (default: input name with -centres suffix)",
+    )
     return parser
 
 
@@ -186,6 +207,30 @@ def main(arguments: list[str] | None = None) -> int:
     options = parser.parse_args(arguments)
     try:
         config = ProjectConfig.load(options.config)
+        if options.command == "annotate-centres":
+            report = AnalysisReport.read(config.work_directory / "analysis.json")
+            video_file = (
+                _project_path(config, options.video) if options.video else config.output_file
+            )
+            render_report_file = (
+                _project_path(config, options.report)
+                if options.report
+                else video_file.with_suffix(".json")
+            )
+            output_file = (
+                _project_path(config, options.output)
+                if options.output
+                else video_file.with_name(f"{video_file.stem}-centres.mp4")
+            )
+            output = annotate_centres(
+                report,
+                input_video=video_file,
+                render_report_file=render_report_file,
+                output_file=output_file,
+                progress=print,
+            )
+            print(f"Annotated {output}")
+            return 0
         config = _with_overrides(config, options)
         if options.command in {"analyze", "run"}:
             report = analyse_project(config, progress=print)
@@ -200,9 +245,19 @@ def main(arguments: list[str] | None = None) -> int:
             output = render_project(config, report, progress=print)
             print(f"Rendered {output}")
         return 0
-    except (AnalysisError, ConfigurationError, RenderError, ValueError) as error:
+    except (
+        AnalysisError,
+        AnnotationError,
+        ConfigurationError,
+        RenderError,
+        ValueError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+
+
+def _project_path(config: ProjectConfig, filename: Path) -> Path:
+    return filename.resolve() if filename.is_absolute() else (config.root / filename).resolve()
 
 
 if __name__ == "__main__":

@@ -83,16 +83,19 @@ The defaults live in [`eclipse.toml`](eclipse.toml). Source photographs are foun
 using their filename pattern but sorted by EXIF `DateTimeOriginal`, with the
 filename used as a deterministic tie-breaker.
 
-Three commands are available:
+Four commands are available:
 
 ```sh
 uv run eclipse-timelapse analyze
 uv run eclipse-timelapse render
 uv run eclipse-timelapse run
+uv run eclipse-timelapse annotate-centres
 ```
 
 `analyze` writes `work/analysis.json`, `work/analysis.csv`, and a labelled contact
 sheet. `render` consumes the JSON report. `run` performs both steps.
+`annotate-centres` creates a separate diagnostic video with the stabilized Sun
+centre in red and the clock-linear path through measured Moon centres in blue.
 
 ## Aspect ratio and resolution
 
@@ -182,6 +185,20 @@ FFV1 preserves every rendered RGB pixel exactly, including the exact source
 anchors and the sparse subtractive states. H.264 and Instagram both re-encode
 pixels, and Instagram may also convert 60 FPS video to 30 FPS; the lossless
 master and its JSON audit report are therefore the authoritative artifacts.
+
+Create a viewing-only centre trace from any rendered video and its matching JSON
+report with:
+
+```sh
+uv run eclipse-timelapse annotate-centres \
+  --video output/eclipse_timelapse_source_anchored_instagram_4x5.mp4 \
+  --output output/eclipse_timelapse_centres_diagnostic_4x5.mp4
+```
+
+The input video is never modified. The red marker is the stabilized solar centre;
+the blue marker and cumulative trail move linearly between the measured lunar
+centres at their source-anchor times. A separate JSON file records the diagnostic
+input, frame counts, colours, path policy, and SHA-256 digest.
 
 ## Blur controls
 

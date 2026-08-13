@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
+from eclipse_timelapse.annotate import annotate_centres
 from eclipse_timelapse.config import AnalysisConfig, InputConfig, ProjectConfig, RenderConfig
 from eclipse_timelapse.model import AnalysisReport, EclipseModel, FrameAnalysis
 from eclipse_timelapse.render import (
@@ -434,6 +435,32 @@ def test_small_video_render_is_decodable(tmp_path) -> None:
         np.any(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) > 30) for image in decoded_frames
     )
     assert bright_frames >= 2
+
+    annotated_output = annotate_centres(
+        report,
+        input_video=output,
+        render_report_file=output.with_suffix(".json"),
+        output_file=tmp_path / "output" / "test-centres.mp4",
+    )
+    annotation_report = json.loads(
+        annotated_output.with_suffix(".json").read_text(encoding="utf-8")
+    )
+    assert annotation_report["encoded_frames"] == 6
+    assert annotation_report["timeline_frames"] == 4
+    assert annotation_report["annotations"]["sun_centre_colour"] == "red"
+    assert annotation_report["annotations"]["moon_centre_colour"] == "blue"
+    annotated_capture = cv2.VideoCapture(str(annotated_output))
+    annotated_frames = []
+    while True:
+        available, image = annotated_capture.read()
+        if not available:
+            break
+        annotated_frames.append(image)
+    annotated_capture.release()
+    assert len(annotated_frames) == 6
+    sun_pixel = annotated_frames[0][40, 32]
+    assert int(sun_pixel[2]) > int(sun_pixel[0]) + 80
+    assert np.any(annotated_frames[-1][:, :, 0] > annotated_frames[-1][:, :, 2] + 80)
 
     filtered_config = replace(
         config,

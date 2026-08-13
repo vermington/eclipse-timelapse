@@ -11,6 +11,10 @@ gaps. Optional synthetic modes can reconstruct a solar texture and use a
 globally fitted physical model. H.264 delivery and lossless FFV1 archival
 outputs are both supported.
 
+The repository intentionally contains no photographs or rendered media. Your
+source files, EXIF-bearing analysis data, previews, and final videos stay local
+unless you deliberately publish them separately.
+
 ## Why this exists
 
 An ordinary image sequence assigns every photograph the same duration. That
@@ -65,8 +69,13 @@ is required.
 
 ## Quick start
 
+Place your eclipse photographs in the repository directory, then adjust the
+input filename pattern and render defaults in [`eclipse.toml`](eclipse.toml).
+Images must contain EXIF `DateTimeOriginal` timestamps; using a consistent focal
+length gives the alignment model the best input.
+
 ```sh
-uv sync --extra dev
+uv sync --locked --extra dev
 uv run eclipse-timelapse run
 ```
 
@@ -224,15 +233,22 @@ The `work/`, `output/`, original photographs, and local virtual environment are
 ignored by Git. This keeps the repository publishable without accidentally
 uploading the source media.
 
+Analysis reports contain source filenames and capture timestamps. They are
+ignored for the same reason. Always inspect `git status` before publishing if
+you have changed the ignore rules or force-added any artifact.
+
 ## Development
 
 ```sh
-uv sync --extra dev
+uv sync --locked --extra dev
+uv run ruff check .
 uv run pytest
 ```
 
 The dependency lockfile is committed for reproducible development. The package
 can also be installed with standard `pip` tooling from `pyproject.toml`.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development and pull-request
+workflow. Notable changes are recorded in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

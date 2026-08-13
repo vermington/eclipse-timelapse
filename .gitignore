@@ -8,6 +8,21 @@
 *.tiff
 *.mp4
 *.mov
+*.mkv
+*.avi
+*.webm
+*.heic
+*.HEIC
+*.raw
+*.RAW
+*.cr2
+*.CR2
+*.nef
+*.NEF
+*.arw
+*.ARW
+*.raf
+*.RAF
 
 # Generated working directories
 output/
@@ -22,6 +37,15 @@ dist/
 .venv/
 .pytest_cache/
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local configuration and logs
+.env
+.env.*
+!.env.example
+*.log
 
 # OS/editor files
 .DS_Store
